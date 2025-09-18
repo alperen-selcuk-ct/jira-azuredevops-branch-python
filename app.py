@@ -3,6 +3,7 @@ from flask import Flask, request, jsonify
 import os
 import requests
 from requests.auth import HTTPBasicAuth
+import re
 
 app = Flask(__name__)
 
@@ -15,12 +16,16 @@ REPO_MAP = {
     "CustomsOnlineMobile": "d00d23f3-a9e2-4869-b711-86a4005f214b"
 }
 
+# Branch regex
+BRANCH_REGEX = r"(?i)^(?!.*\s)(?:AI|BE|CT|DO|FE|MP|SQL|TD|UI)-\d+(?:-[a-z0-9]+){2,}$"
+
 AZURE_ORG = "customstechnologies"
 AZURE_PROJECT = "CustomsOnline"
-AZURE_PAT = os.environ.get("AZURE_PAT")  # Render'da secret olarak ayarla
+AZURE_PAT = os.environ.get("AZURE_PAT")
 
 if not AZURE_PAT:
     raise ValueError("AZURE_PAT environment variable not set!")
+
 
 @app.route("/newBranch", methods=["GET"])
 def new_branch():
@@ -31,6 +36,10 @@ def new_branch():
         return jsonify({"error": "ticket and repo query parameters required"}), 400
     if repo_name not in REPO_MAP:
         return jsonify({"error": f"Unknown repo '{repo_name}'"}), 400
+    
+    # Regex kontrolü
+    if not re.match(BRANCH_REGEX, ticket):
+        return jsonify({"error": f"Ticket '{ticket}' does not match branch regex"}), 400
     
     repo_id = REPO_MAP[repo_name]
     
@@ -46,13 +55,13 @@ def new_branch():
     except Exception as e:
         return jsonify({"error": "Failed to parse dev branch SHA", "details": str(e), "response_text": r.text}), 500
     
-    # 2️⃣ Yeni branch oluştur
-    new_branch_name = f"feature/{ticket}"
+    # 2️⃣ Yeni branch oluştur (prefix yok)
+    new_branch_name = ticket
     create_ref_url = f"https://dev.azure.com/{AZURE_ORG}/{AZURE_PROJECT}/_apis/git/repositories/{repo_id}/refs?api-version=7.1-preview.1"
     
     payload = {
         "name": f"refs/heads/{new_branch_name}",
-        "oldObjectId": "0000000000000000000000000000000000000000",  # Yeni branch
+        "oldObjectId": "0000000000000000000000000000000000000000",
         "newObjectId": sha
     }
     
