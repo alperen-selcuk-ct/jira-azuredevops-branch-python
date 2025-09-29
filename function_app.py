@@ -6,7 +6,8 @@ from requests.auth import HTTPBasicAuth
 import re
 import json
 
-app = func.FunctionApp()
+# Flex Consumption için Function App instance
+app = func.FunctionApp(http_auth_level=func.AuthLevel.ANONYMOUS)
 
 # Repo mapping
 REPO_MAP = {
