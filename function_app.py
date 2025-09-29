@@ -6,8 +6,8 @@ from requests.auth import HTTPBasicAuth
 import re
 import json
 
-# Flex Consumption için Function App instance
-app = func.FunctionApp(http_auth_level=func.AuthLevel.ANONYMOUS)
+# Function App instance
+app = func.FunctionApp()
 
 # Repo mapping
 REPO_MAP = {
@@ -32,14 +32,16 @@ def get_azure_pat():
     return azure_pat
 
 
-@app.route(route="test", methods=["GET"])
+@app.function_name("test")
+@app.route(route="test", auth_level=func.AuthLevel.ANONYMOUS)
 def test_function(req: func.HttpRequest) -> func.HttpResponse:
     """Simple test function"""
     logging.info('Test function called')
     return func.HttpResponse("Hello from Azure Functions!", status_code=200)
 
 
-@app.route(route="newBranch", methods=["GET"])
+@app.function_name("newBranch")
+@app.route(route="newBranch", auth_level=func.AuthLevel.ANONYMOUS)
 def new_branch(req: func.HttpRequest) -> func.HttpResponse:
     """HTTP trigger function to create a new branch in Azure DevOps"""
     logging.info('Python HTTP trigger function processed a request.')
@@ -164,7 +166,8 @@ def new_branch(req: func.HttpRequest) -> func.HttpResponse:
         )
 
 
-@app.route(route="healthcheck", methods=["GET"])
+@app.function_name("healthcheck")
+@app.route(route="healthcheck", auth_level=func.AuthLevel.ANONYMOUS)
 def healthcheck(req: func.HttpRequest) -> func.HttpResponse:
     """Health check endpoint"""
     logging.info('Health check requested.')
