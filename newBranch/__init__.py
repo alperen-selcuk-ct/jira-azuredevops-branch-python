@@ -1,12 +1,10 @@
-import azure.functions as func
 import logging
 import os
 import requests
 from requests.auth import HTTPBasicAuth
 import re
 import json
-
-app = func.FunctionApp()
+import azure.functions as func
 
 # Repo mapping
 REPO_MAP = {
@@ -31,8 +29,7 @@ def get_azure_pat():
     return azure_pat
 
 
-@app.route(route="newBranch", methods=["GET"])
-def new_branch(req: func.HttpRequest) -> func.HttpResponse:
+def main(req: func.HttpRequest) -> func.HttpResponse:
     """HTTP trigger function to create a new branch in Azure DevOps"""
     logging.info('Python HTTP trigger function processed a request.')
     
@@ -154,14 +151,3 @@ def new_branch(req: func.HttpRequest) -> func.HttpResponse:
             status_code=500,
             mimetype="application/json"
         )
-
-
-@app.route(route="healthcheck", methods=["GET"])
-def healthcheck(req: func.HttpRequest) -> func.HttpResponse:
-    """Health check endpoint"""
-    logging.info('Health check requested.')
-    
-    return func.HttpResponse(
-        "OK",
-        status_code=200
-    )
