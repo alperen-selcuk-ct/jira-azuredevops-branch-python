@@ -6,7 +6,7 @@ from requests.auth import HTTPBasicAuth
 import re
 import json
 
-# Function App instance
+# Basit Function App instance - Python 3.12 için
 app = func.FunctionApp()
 
 # Repo mapping
@@ -32,16 +32,14 @@ def get_azure_pat():
     return azure_pat
 
 
-@app.function_name("test")
-@app.route(route="test", auth_level=func.AuthLevel.ANONYMOUS)
+@app.route(route="test")
 def test_function(req: func.HttpRequest) -> func.HttpResponse:
     """Simple test function"""
     logging.info('Test function called')
-    return func.HttpResponse("Hello from Azure Functions!", status_code=200)
+    return func.HttpResponse("Hello from Azure Functions Python 3.12!", status_code=200)
 
 
-@app.function_name("newBranch")
-@app.route(route="newBranch", auth_level=func.AuthLevel.ANONYMOUS)
+@app.route(route="newBranch")
 def new_branch(req: func.HttpRequest) -> func.HttpResponse:
     """HTTP trigger function to create a new branch in Azure DevOps"""
     logging.info('Python HTTP trigger function processed a request.')
@@ -166,9 +164,8 @@ def new_branch(req: func.HttpRequest) -> func.HttpResponse:
         )
 
 
-@app.function_name("healthcheck")
-@app.route(route="healthcheck", auth_level=func.AuthLevel.ANONYMOUS)
+@app.route(route="healthcheck")
 def healthcheck(req: func.HttpRequest) -> func.HttpResponse:
     """Health check endpoint"""
     logging.info('Health check requested.')
-    return func.HttpResponse("OK", status_code=200)
+    return func.HttpResponse("OK - Python 3.12", status_code=200)
