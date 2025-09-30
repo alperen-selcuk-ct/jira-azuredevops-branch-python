@@ -20,7 +20,7 @@ AZURE_ORG = "customstechnologies"
 AZURE_PROJECT = "CustomsOnline"
 
 @app.function_name(name="HttpExample")
-@app.route(route="test", methods=["get", "post"])
+@app.route(route="test", methods=["get", "post"], auth_level=func.AuthLevel.ANONYMOUS)
 def test_function(req: func.HttpRequest) -> func.HttpResponse:
     logging.info('Python HTTP trigger function processed a request.')
 
@@ -43,7 +43,7 @@ def test_function(req: func.HttpRequest) -> func.HttpResponse:
 
 
 @app.function_name(name="NewBranch")
-@app.route(route="newBranch", methods=["get"])
+@app.route(route="newBranch", methods=["get"], auth_level=func.AuthLevel.ANONYMOUS)
 def new_branch(req: func.HttpRequest) -> func.HttpResponse:
     logging.info('NewBranch function called.')
     
@@ -104,41 +104,7 @@ def new_branch(req: func.HttpRequest) -> func.HttpResponse:
         encoded_credentials = base64.b64encode(credentials.encode()).decode()
         
         try:
-            # 🔍 1. Önce branch'in var olup olmadığını kontrol et
-            check_url = f"https://dev.azure.com/{AZURE_ORG}/{AZURE_PROJECT}/_apis/git/repositories/{repo_id}/refs/heads/{ticket}?api-version=7.1-preview.1"
-            
-            req_check = urllib.request.Request(check_url)
-            req_check.add_header("Authorization", f"Basic {encoded_credentials}")
-            req_check.add_header("Content-Type", "application/json")
-            
-            try:
-                with urllib.request.urlopen(req_check) as response:
-                    # Eğer 200 döndüyse branch zaten var
-                    if response.status == 200:
-                        logging.warning(f"Branch '{ticket}' already exists in repo '{repo_name}'")
-                        return func.HttpResponse(
-                            json.dumps({
-                                "error": f"Branch '{ticket}' already exists in repository '{repo_name}'",
-                                "branch": ticket,
-                                "repo": repo_name,
-                                "status": "already_exists"
-                            }),
-                            status_code=409,
-                            mimetype="application/json"
-                        )
-            except urllib.error.HTTPError as check_error:
-                # 404 hatası normal - branch yok demek, devam et
-                if check_error.code != 404:
-                    logging.error(f"Branch check failed: {check_error.code}")
-                    return func.HttpResponse(
-                        json.dumps({"error": "Failed to check branch existence", "details": str(check_error)}),
-                        status_code=500,
-                        mimetype="application/json"
-                    )
-                # 404 ise branch yok, devam edebiliriz
-                logging.info(f"Branch '{ticket}' does not exist, proceeding with creation")
-            
-            # 📥 2. Dev branch'in SHA'sını al
+            # 1️⃣ Dev branch'in SHA'sını al
             dev_url = f"https://dev.azure.com/{AZURE_ORG}/{AZURE_PROJECT}/_apis/git/repositories/{repo_id}/refs/heads/dev?api-version=7.1-preview.1"
             
             req_dev = urllib.request.Request(dev_url)
@@ -150,7 +116,7 @@ def new_branch(req: func.HttpRequest) -> func.HttpResponse:
                 sha = dev_data["value"][0]["objectId"]
                 logging.info(f"Got dev branch SHA: {sha}")
             
-            # 🌿 3. Yeni branch oluştur
+            # 2️⃣ Yeni branch oluştur
             create_url = f"https://dev.azure.com/{AZURE_ORG}/{AZURE_PROJECT}/_apis/git/repositories/{repo_id}/refs?api-version=7.1-preview.1"
             
             payload = [{
@@ -189,11 +155,23 @@ def new_branch(req: func.HttpRequest) -> func.HttpResponse:
             error_msg = e.read().decode() if e.fp else str(e)
             logging.error(f"Azure DevOps API error: {e.code} - {error_msg}")
             
-            return func.HttpResponse(
-                json.dumps({"error": "Azure DevOps API error", "details": error_msg}),
-                status_code=500,
-                mimetype="application/json"
-            )
+            if e.code == 409:
+                return func.HttpResponse(
+                    json.dumps({
+                        "error": f"Branch '{ticket}' already exists in repository '{repo_name}'",
+                        "branch": ticket,
+                        "repo": repo_name,
+                        "status": "already_exists"
+                    }),
+                    status_code=409,
+                    mimetype="application/json"
+                )
+            else:
+                return func.HttpResponse(
+                    json.dumps({"error": "Azure DevOps API error", "details": error_msg}),
+                    status_code=500,
+                    mimetype="application/json"
+                )
         
         except Exception as api_error:
             logging.error(f"API call failed: {str(api_error)}")
@@ -213,7 +191,7 @@ def new_branch(req: func.HttpRequest) -> func.HttpResponse:
 
 
 @app.function_name(name="HealthCheck")
-@app.route(route="healthcheck", methods=["get"])
+@app.route(route="healthcheck", methods=["get"], auth_level=func.AuthLevel.ANONYMOUS)
 def healthcheck(req: func.HttpRequest) -> func.HttpResponse:
     logging.info('HealthCheck function called.')
     return func.HttpResponse("OK - All systems working!")
