@@ -55,14 +55,24 @@ def new_branch(req: func.HttpRequest) -> func.HttpResponse:
         # Basit kontroller
         if not ticket or not repo_name:
             return func.HttpResponse(
-                json.dumps({"error": "ticket and repo query parameters required"}),
+                json.dumps({
+                    "status": "MISSING_PARAMETERS",
+                    "message": "❌ ERROR: Missing required parameters",
+                    "error": "Both 'ticket' and 'repo' parameters are required",
+                    "success": False
+                }),
                 status_code=400,
                 mimetype="application/json"
             )
         
         if repo_name not in REPO_MAP:
             return func.HttpResponse(
-                json.dumps({"error": f"Unknown repo '{repo_name}'. Available repos: {list(REPO_MAP.keys())}"}),
+                json.dumps({
+                    "status": "INVALID_REPO",
+                    "message": f"❌ ERROR: Unknown repository '{repo_name}'",
+                    "error": f"Available repos: {', '.join(REPO_MAP.keys())}",
+                    "success": False
+                }),
                 status_code=400,
                 mimetype="application/json"
             )
@@ -75,9 +85,12 @@ def new_branch(req: func.HttpRequest) -> func.HttpResponse:
         if not any(ticket_upper.startswith(prefix) for prefix in valid_prefixes):
             return func.HttpResponse(
                 json.dumps({
-                    "error": f"Ticket '{ticket}' does not start with valid prefix", 
-                    "valid_prefixes": valid_prefixes,
-                    "example": "AI-123-feature-name"
+                    "status": "BRANCH_NAME_WRONG",
+                    "message": f"❌ BRANCH NAME ERROR: '{ticket}' format is invalid",
+                    "error": f"Ticket must start with valid prefix: {', '.join(valid_prefixes)}",
+                    "example": "AI-123-feature-name",
+                    "ticket": ticket,
+                    "success": False
                 }),
                 status_code=400,
                 mimetype="application/json"
@@ -137,12 +150,13 @@ def new_branch(req: func.HttpRequest) -> func.HttpResponse:
             
             # ✅ Başarılı response
             response_data = {
-                "message": f"Branch '{ticket}' created successfully in repo '{repo_name}'",
+                "status": "BRANCH_CREATED",
+                "message": f"✅ SUCCESS: Branch '{ticket}' created successfully in '{repo_name}'",
                 "branch": ticket,
                 "repo": repo_name,
                 "repo_id": repo_id,
                 "commit": sha,
-                "status": "created"
+                "success": True
             }
             
             return func.HttpResponse(
@@ -158,10 +172,12 @@ def new_branch(req: func.HttpRequest) -> func.HttpResponse:
             if e.code == 409:
                 return func.HttpResponse(
                     json.dumps({
-                        "error": f"Branch '{ticket}' already exists in repository '{repo_name}'",
+                        "status": "BRANCH_CONFLICT",
+                        "message": f"⚠️ CONFLICT: Branch '{ticket}' already exists in '{repo_name}'",
                         "branch": ticket,
                         "repo": repo_name,
-                        "status": "already_exists"
+                        "error": "Branch already exists",
+                        "success": False
                     }),
                     status_code=409,
                     mimetype="application/json"
