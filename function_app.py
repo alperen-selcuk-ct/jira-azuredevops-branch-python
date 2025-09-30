@@ -94,22 +94,92 @@ def new_branch(req: func.HttpRequest) -> func.HttpResponse:
         
         repo_id = REPO_MAP[repo_name]
         
-        # SIMÜLASYON - Gerçek API çağrısı yapmayacağız şimdilik
-        response_data = {
-            "message": f"Branch '{ticket}' would be created in repo '{repo_name}'",
-            "branch": ticket,
-            "repo": repo_name,
-            "repo_id": repo_id,
-            "validation": "passed",
-            "status": "simulated"
-        }
+        # 🌐 GERÇEK AZURE DEVOPS API ÇAĞRISI - urllib kullanarak
+        import urllib.request
+        import urllib.parse
+        import base64
         
-        logging.info(f"Simulated branch creation: {ticket}")
-        return func.HttpResponse(
-            json.dumps(response_data),
-            status_code=200,
-            mimetype="application/json"
-        )
+        # Basic Authentication için header hazırla
+        credentials = f":{azure_pat}"
+        encoded_credentials = base64.b64encode(credentials.encode()).decode()
+        
+        try:
+            # 1️⃣ Dev branch'in SHA'sını al
+            dev_url = f"https://dev.azure.com/{AZURE_ORG}/{AZURE_PROJECT}/_apis/git/repositories/{repo_id}/refs/heads/dev?api-version=7.1-preview.1"
+            
+            req_dev = urllib.request.Request(dev_url)
+            req_dev.add_header("Authorization", f"Basic {encoded_credentials}")
+            req_dev.add_header("Content-Type", "application/json")
+            
+            with urllib.request.urlopen(req_dev) as response:
+                dev_data = json.loads(response.read().decode())
+                sha = dev_data["value"][0]["objectId"]
+                logging.info(f"Got dev branch SHA: {sha}")
+            
+            # 2️⃣ Yeni branch oluştur
+            create_url = f"https://dev.azure.com/{AZURE_ORG}/{AZURE_PROJECT}/_apis/git/repositories/{repo_id}/refs?api-version=7.1-preview.1"
+            
+            payload = [{
+                "name": f"refs/heads/{ticket}",
+                "oldObjectId": "0000000000000000000000000000000000000000",
+                "newObjectId": sha
+            }]
+            
+            data = json.dumps(payload).encode()
+            
+            req_create = urllib.request.Request(create_url, data=data, method='POST')
+            req_create.add_header("Authorization", f"Basic {encoded_credentials}")
+            req_create.add_header("Content-Type", "application/json")
+            
+            with urllib.request.urlopen(req_create) as response:
+                create_result = json.loads(response.read().decode())
+                logging.info(f"Branch created successfully: {ticket}")
+            
+            # ✅ Başarılı response
+            response_data = {
+                "message": f"Branch '{ticket}' created successfully in repo '{repo_name}'",
+                "branch": ticket,
+                "repo": repo_name,
+                "repo_id": repo_id,
+                "commit": sha,
+                "status": "created"
+            }
+            
+            return func.HttpResponse(
+                json.dumps(response_data),
+                status_code=200,
+                mimetype="application/json"
+            )
+            
+        except urllib.error.HTTPError as e:
+            error_msg = e.read().decode() if e.fp else str(e)
+            logging.error(f"Azure DevOps API error: {e.code} - {error_msg}")
+            
+            if e.code == 409:
+                return func.HttpResponse(
+                    json.dumps({
+                        "error": f"Branch '{ticket}' already exists in repository '{repo_name}'",
+                        "branch": ticket,
+                        "repo": repo_name,
+                        "status": "already_exists"
+                    }),
+                    status_code=409,
+                    mimetype="application/json"
+                )
+            else:
+                return func.HttpResponse(
+                    json.dumps({"error": "Azure DevOps API error", "details": error_msg}),
+                    status_code=500,
+                    mimetype="application/json"
+                )
+        
+        except Exception as api_error:
+            logging.error(f"API call failed: {str(api_error)}")
+            return func.HttpResponse(
+                json.dumps({"error": "Failed to create branch", "details": str(api_error)}),
+                status_code=500,
+                mimetype="application/json"
+            )
         
     except Exception as e:
         logging.error(f"Unexpected error: {str(e)}")
