@@ -206,6 +206,181 @@ def new_branch(req: func.HttpRequest) -> func.HttpResponse:
         )
 
 
+@app.function_name(name="DeleteBranch")
+@app.route(route="deleteBranch", methods=["get"], auth_level=func.AuthLevel.ANONYMOUS)
+def delete_branch(req: func.HttpRequest) -> func.HttpResponse:
+    logging.info('DeleteBranch function called.')
+    
+    try:
+        # Parametreleri al
+        ticket = req.params.get('ticket')
+        repo_name = req.params.get('repo')
+        
+        # Basit kontroller
+        if not ticket or not repo_name:
+            return func.HttpResponse(
+                json.dumps({
+                    "status": "MISSING_PARAMETERS",
+                    "message": "❌ ERROR: Missing required parameters",
+                    "error": "Both 'ticket' and 'repo' parameters are required",
+                    "success": False
+                }),
+                status_code=400,
+                mimetype="application/json"
+            )
+        
+        if repo_name not in REPO_MAP:
+            return func.HttpResponse(
+                json.dumps({
+                    "status": "INVALID_REPO",
+                    "message": f"❌ ERROR: Unknown repository '{repo_name}'",
+                    "error": f"Available repos: {', '.join(REPO_MAP.keys())}",
+                    "success": False
+                }),
+                status_code=400,
+                mimetype="application/json"
+            )
+        
+        # Main/master/dev branch'lerini korumalı kontrol
+        protected_branches = ["main", "master", "dev", "develop", "release"]
+        if ticket.lower() in protected_branches:
+            return func.HttpResponse(
+                json.dumps({
+                    "status": "PROTECTED_BRANCH",
+                    "message": f"❌ ERROR: Cannot delete protected branch '{ticket}'",
+                    "error": f"Protected branches: {', '.join(protected_branches)}",
+                    "success": False
+                }),
+                status_code=403,
+                mimetype="application/json"
+            )
+        
+        # AZURE_PAT kontrolü
+        azure_pat = os.environ.get("AZURE_PAT")
+        if not azure_pat:
+            return func.HttpResponse(
+                json.dumps({"error": "AZURE_PAT environment variable not set"}),
+                status_code=500,
+                mimetype="application/json"
+            )
+        
+        repo_id = REPO_MAP[repo_name]
+        
+        # 🌐 GERÇEK AZURE DEVOPS API ÇAĞRISI - urllib kullanarak
+        import urllib.request
+        import urllib.parse
+        import base64
+        
+        # Basic Authentication için header hazırla
+        credentials = f":{azure_pat}"
+        encoded_credentials = base64.b64encode(credentials.encode()).decode()
+        
+        try:
+            # 1️⃣ Önce branch'in var olup olmadığını kontrol et
+            check_url = f"https://dev.azure.com/{AZURE_ORG}/{AZURE_PROJECT}/_apis/git/repositories/{repo_id}/refs/heads/{ticket}?api-version=7.1-preview.1"
+            
+            req_check = urllib.request.Request(check_url)
+            req_check.add_header("Authorization", f"Basic {encoded_credentials}")
+            req_check.add_header("Content-Type", "application/json")
+            
+            try:
+                with urllib.request.urlopen(req_check) as response:
+                    branch_data = json.loads(response.read().decode())
+                    current_sha = branch_data["value"][0]["objectId"]
+                    logging.info(f"Found branch '{ticket}' with SHA: {current_sha}")
+            except urllib.error.HTTPError as check_error:
+                if check_error.code == 404:
+                    return func.HttpResponse(
+                        json.dumps({
+                            "status": "BRANCH_NOT_FOUND",
+                            "message": f"⚠️ NOT FOUND: Branch '{ticket}' does not exist in '{repo_name}'",
+                            "branch": ticket,
+                            "repo": repo_name,
+                            "error": "Branch not found",
+                            "success": False
+                        }),
+                        status_code=404,
+                        mimetype="application/json"
+                    )
+                else:
+                    raise check_error
+            
+            # 2️⃣ Branch'i sil
+            delete_url = f"https://dev.azure.com/{AZURE_ORG}/{AZURE_PROJECT}/_apis/git/repositories/{repo_id}/refs?api-version=7.1-preview.1"
+            
+            payload = [{
+                "name": f"refs/heads/{ticket}",
+                "oldObjectId": current_sha,
+                "newObjectId": "0000000000000000000000000000000000000000"
+            }]
+            
+            data = json.dumps(payload).encode()
+            
+            req_delete = urllib.request.Request(delete_url, data=data, method='POST')
+            req_delete.add_header("Authorization", f"Basic {encoded_credentials}")
+            req_delete.add_header("Content-Type", "application/json")
+            
+            with urllib.request.urlopen(req_delete) as response:
+                delete_result = json.loads(response.read().decode())
+                logging.info(f"Branch deleted successfully: {ticket}")
+            
+            # ✅ Başarılı response
+            response_data = {
+                "status": "BRANCH_DELETED",
+                "message": f"✅ SUCCESS: Branch '{ticket}' deleted successfully from '{repo_name}'",
+                "branch": ticket,
+                "repo": repo_name,
+                "repo_id": repo_id,
+                "success": True
+            }
+            
+            return func.HttpResponse(
+                json.dumps(response_data),
+                status_code=200,
+                mimetype="application/json"
+            )
+            
+        except urllib.error.HTTPError as e:
+            error_msg = e.read().decode() if e.fp else str(e)
+            logging.error(f"Azure DevOps API error: {e.code} - {error_msg}")
+            
+            if e.code == 404:
+                return func.HttpResponse(
+                    json.dumps({
+                        "status": "BRANCH_NOT_FOUND",
+                        "message": f"⚠️ NOT FOUND: Branch '{ticket}' does not exist in '{repo_name}'",
+                        "branch": ticket,
+                        "repo": repo_name,
+                        "error": "Branch not found",
+                        "success": False
+                    }),
+                    status_code=404,
+                    mimetype="application/json"
+                )
+            else:
+                return func.HttpResponse(
+                    json.dumps({"error": "Azure DevOps API error", "details": error_msg}),
+                    status_code=500,
+                    mimetype="application/json"
+                )
+        
+        except Exception as api_error:
+            logging.error(f"API call failed: {str(api_error)}")
+            return func.HttpResponse(
+                json.dumps({"error": "Failed to delete branch", "details": str(api_error)}),
+                status_code=500,
+                mimetype="application/json"
+            )
+        
+    except Exception as e:
+        logging.error(f"Unexpected error: {str(e)}")
+        return func.HttpResponse(
+            json.dumps({"error": "Internal server error", "details": str(e)}),
+            status_code=500,
+            mimetype="application/json"
+        )
+
+
 @app.function_name(name="HealthCheck")
 @app.route(route="healthcheck", methods=["get"], auth_level=func.AuthLevel.ANONYMOUS)
 def healthcheck(req: func.HttpRequest) -> func.HttpResponse:
