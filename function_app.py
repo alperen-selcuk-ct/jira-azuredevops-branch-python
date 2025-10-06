@@ -381,6 +381,285 @@ def delete_branch(req: func.HttpRequest) -> func.HttpResponse:
         )
 
 
+@app.function_name(name="TaskTransition")
+@app.route(route="taskTransition", methods=["get", "post"], auth_level=func.AuthLevel.ANONYMOUS)
+def task_transition(req: func.HttpRequest) -> func.HttpResponse:
+    logging.info('TaskTransition function called.')
+    
+    try:
+        # Parametreleri al (GET veya POST body'den)
+        if req.method == "GET":
+            ticket = req.params.get('ticket')
+            repo_name = req.params.get('repo')
+            from_status = req.params.get('from')
+            to_status = req.params.get('to')
+        else:
+            try:
+                req_body = req.get_json()
+                ticket = req_body.get('ticket')
+                repo_name = req_body.get('repo')
+                from_status = req_body.get('from')
+                to_status = req_body.get('to')
+            except:
+                return func.HttpResponse(
+                    json.dumps({
+                        "status": "INVALID_JSON",
+                        "message": "❌ ERROR: Invalid JSON in request body",
+                        "success": False
+                    }),
+                    status_code=400,
+                    mimetype="application/json"
+                )
+        
+        # Basit kontroller
+        if not all([ticket, repo_name, from_status, to_status]):
+            return func.HttpResponse(
+                json.dumps({
+                    "status": "MISSING_PARAMETERS",
+                    "message": "❌ ERROR: Missing required parameters",
+                    "error": "Required: ticket, repo, from, to parameters",
+                    "success": False
+                }),
+                status_code=400,
+                mimetype="application/json"
+            )
+        
+        if repo_name not in REPO_MAP:
+            return func.HttpResponse(
+                json.dumps({
+                    "status": "INVALID_REPO",
+                    "message": f"❌ ERROR: Unknown repository '{repo_name}'",
+                    "error": f"Available repos: {', '.join(REPO_MAP.keys())}",
+                    "success": False
+                }),
+                status_code=400,
+                mimetype="application/json"
+            )
+        
+        # Sadece belirli geçişleri destekle
+        if from_status.lower() != "in development" or to_status.lower() != "code review":
+            return func.HttpResponse(
+                json.dumps({
+                    "status": "UNSUPPORTED_TRANSITION",
+                    "message": f"❌ ERROR: Transition '{from_status}' → '{to_status}' not supported",
+                    "error": "Only 'In Development' → 'Code Review' transition is supported",
+                    "success": False
+                }),
+                status_code=400,
+                mimetype="application/json"
+            )
+        
+        # AZURE_PAT kontrolü
+        azure_pat = os.environ.get("AZURE_PAT")
+        if not azure_pat:
+            return func.HttpResponse(
+                json.dumps({"error": "AZURE_PAT environment variable not set"}),
+                status_code=500,
+                mimetype="application/json"
+            )
+        
+        repo_id = REPO_MAP[repo_name]
+        
+        # 🌐 AZURE DEVOPS API ÇAĞRILARI
+        import urllib.request
+        import urllib.parse
+        import base64
+        
+        # Basic Authentication için header hazırla
+        credentials = f":{azure_pat}"
+        encoded_credentials = base64.b64encode(credentials.encode()).decode()
+        
+        try:
+            # 1️⃣ Task branch'inin varlığını kontrol et
+            branch_url = f"https://dev.azure.com/{AZURE_ORG}/{AZURE_PROJECT}/_apis/git/repositories/{repo_id}/refs/heads/{ticket}?api-version=7.1-preview.1"
+            
+            req_branch = urllib.request.Request(branch_url)
+            req_branch.add_header("Authorization", f"Basic {encoded_credentials}")
+            
+            try:
+                with urllib.request.urlopen(req_branch) as response:
+                    branch_data = json.loads(response.read().decode())
+                    task_branch_sha = branch_data["value"][0]["objectId"]
+                    logging.info(f"Found task branch '{ticket}' with SHA: {task_branch_sha}")
+            except urllib.error.HTTPError as e:
+                if e.code == 404:
+                    return func.HttpResponse(
+                        json.dumps({
+                            "status": "TASK_BRANCH_NOT_FOUND",
+                            "message": f"❌ ERROR: Task branch '{ticket}' not found in '{repo_name}'",
+                            "error": "Create the branch first using newBranch endpoint",
+                            "success": False
+                        }),
+                        status_code=404,
+                        mimetype="application/json"
+                    )
+                else:
+                    raise e
+            
+            # 2️⃣ Dev branch'inin SHA'sını al
+            dev_url = f"https://dev.azure.com/{AZURE_ORG}/{AZURE_PROJECT}/_apis/git/repositories/{repo_id}/refs/heads/dev?api-version=7.1-preview.1"
+            
+            req_dev = urllib.request.Request(dev_url)
+            req_dev.add_header("Authorization", f"Basic {encoded_credentials}")
+            
+            with urllib.request.urlopen(req_dev) as response:
+                dev_data = json.loads(response.read().decode())
+                dev_sha = dev_data["value"][0]["objectId"]
+                logging.info(f"Got dev branch SHA: {dev_sha}")
+            
+            # 3️⃣ Test branch'inin SHA'sını al
+            test_url = f"https://dev.azure.com/{AZURE_ORG}/{AZURE_PROJECT}/_apis/git/repositories/{repo_id}/refs/heads/test?api-version=7.1-preview.1"
+            
+            req_test = urllib.request.Request(test_url)
+            req_test.add_header("Authorization", f"Basic {encoded_credentials}")
+            
+            try:
+                with urllib.request.urlopen(req_test) as response:
+                    test_data = json.loads(response.read().decode())
+                    test_sha = test_data["value"][0]["objectId"]
+                    logging.info(f"Got test branch SHA: {test_sha}")
+            except urllib.error.HTTPError as e:
+                if e.code == 404:
+                    return func.HttpResponse(
+                        json.dumps({
+                            "status": "TEST_BRANCH_NOT_FOUND",
+                            "message": f"❌ ERROR: Test branch not found in '{repo_name}'",
+                            "error": "Test branch must exist for PR creation",
+                            "success": False
+                        }),
+                        status_code=404,
+                        mimetype="application/json"
+                    )
+                else:
+                    raise e
+            
+            # 4️⃣ Task branch'ini dev ile merge et (conflict kontrolü ile)
+            merge_url = f"https://dev.azure.com/{AZURE_ORG}/{AZURE_PROJECT}/_apis/git/repositories/{repo_id}/merges?api-version=7.1-preview.1"
+            
+            merge_payload = {
+                "parents": [dev_sha, task_branch_sha],
+                "commitMessage": f"Merge {ticket} into dev - Task transition to Code Review"
+            }
+            
+            merge_data = json.dumps(merge_payload).encode()
+            
+            req_merge = urllib.request.Request(merge_url, data=merge_data, method='POST')
+            req_merge.add_header("Authorization", f"Basic {encoded_credentials}")
+            req_merge.add_header("Content-Type", "application/json")
+            
+            try:
+                with urllib.request.urlopen(req_merge) as response:
+                    merge_result = json.loads(response.read().decode())
+                    merge_commit_sha = merge_result["commitId"]
+                    logging.info(f"Merge successful, commit SHA: {merge_commit_sha}")
+            except urllib.error.HTTPError as merge_error:
+                error_msg = merge_error.read().decode() if merge_error.fp else str(merge_error)
+                if "conflict" in error_msg.lower() or merge_error.code == 409:
+                    return func.HttpResponse(
+                        json.dumps({
+                            "status": "MERGE_CONFLICT",
+                            "message": f"⚠️ CONFLICT: Cannot merge '{ticket}' into dev due to conflicts",
+                            "error": "Resolve conflicts manually before transitioning to Code Review",
+                            "branch": ticket,
+                            "repo": repo_name,
+                            "success": False
+                        }),
+                        status_code=409,
+                        mimetype="application/json"
+                    )
+                else:
+                    raise merge_error
+            
+            # 5️⃣ Dev branch'ini yeni merge commit ile güncelle
+            update_dev_url = f"https://dev.azure.com/{AZURE_ORG}/{AZURE_PROJECT}/_apis/git/repositories/{repo_id}/refs?api-version=7.1-preview.1"
+            
+            update_payload = [{
+                "name": "refs/heads/dev",
+                "oldObjectId": dev_sha,
+                "newObjectId": merge_commit_sha
+            }]
+            
+            update_data = json.dumps(update_payload).encode()
+            
+            req_update = urllib.request.Request(update_dev_url, data=update_data, method='POST')
+            req_update.add_header("Authorization", f"Basic {encoded_credentials}")
+            req_update.add_header("Content-Type", "application/json")
+            
+            with urllib.request.urlopen(req_update) as response:
+                update_result = json.loads(response.read().decode())
+                logging.info(f"Dev branch updated successfully")
+            
+            # 6️⃣ Task branch'inden test branch'ine PR oluştur
+            pr_url = f"https://dev.azure.com/{AZURE_ORG}/{AZURE_PROJECT}/_apis/git/repositories/{repo_id}/pullrequests?api-version=7.1-preview.1"
+            
+            pr_payload = {
+                "sourceRefName": f"refs/heads/{ticket}",
+                "targetRefName": "refs/heads/test",
+                "title": f"[{ticket}] Ready for Testing",
+                "description": f"Task {ticket} has been merged into dev and is ready for testing.\n\nStatus Transition: In Development → Code Review",
+                "isDraft": False
+            }
+            
+            pr_data = json.dumps(pr_payload).encode()
+            
+            req_pr = urllib.request.Request(pr_url, data=pr_data, method='POST')
+            req_pr.add_header("Authorization", f"Basic {encoded_credentials}")
+            req_pr.add_header("Content-Type", "application/json")
+            
+            with urllib.request.urlopen(req_pr) as response:
+                pr_result = json.loads(response.read().decode())
+                pr_id = pr_result["pullRequestId"]
+                pr_url_web = pr_result["_links"]["web"]["href"]
+                logging.info(f"PR created successfully: {pr_id}")
+            
+            # ✅ Başarılı response
+            response_data = {
+                "status": "TRANSITION_SUCCESS",
+                "message": f"✅ SUCCESS: Task '{ticket}' transitioned from 'In Development' to 'Code Review'",
+                "ticket": ticket,
+                "repo": repo_name,
+                "actions_completed": [
+                    f"Merged '{ticket}' into dev branch",
+                    f"Created PR #{pr_id} from '{ticket}' to test branch"
+                ],
+                "merge_commit": merge_commit_sha,
+                "pr_id": pr_id,
+                "pr_url": pr_url_web,
+                "success": True
+            }
+            
+            return func.HttpResponse(
+                json.dumps(response_data),
+                status_code=200,
+                mimetype="application/json"
+            )
+            
+        except urllib.error.HTTPError as e:
+            error_msg = e.read().decode() if e.fp else str(e)
+            logging.error(f"Azure DevOps API error: {e.code} - {error_msg}")
+            return func.HttpResponse(
+                json.dumps({"error": "Azure DevOps API error", "details": error_msg}),
+                status_code=500,
+                mimetype="application/json"
+            )
+        
+        except Exception as api_error:
+            logging.error(f"API call failed: {str(api_error)}")
+            return func.HttpResponse(
+                json.dumps({"error": "Failed to process task transition", "details": str(api_error)}),
+                status_code=500,
+                mimetype="application/json"
+            )
+        
+    except Exception as e:
+        logging.error(f"Unexpected error: {str(e)}")
+        return func.HttpResponse(
+            json.dumps({"error": "Internal server error", "details": str(e)}),
+            status_code=500,
+            mimetype="application/json"
+        )
+
+
 @app.function_name(name="HealthCheck")
 @app.route(route="healthcheck", methods=["get"], auth_level=func.AuthLevel.ANONYMOUS)
 def healthcheck(req: func.HttpRequest) -> func.HttpResponse:
