@@ -117,7 +117,19 @@ def new_branch(req: func.HttpRequest) -> func.HttpResponse:
         encoded_credentials = base64.b64encode(credentials.encode()).decode()
         
         try:
-            # 1️⃣ Önce branch'in var olup olmadığını kontrol et
+            # 1️⃣ Dev branch'in SHA'sını al
+            dev_url = f"https://dev.azure.com/{AZURE_ORG}/{AZURE_PROJECT}/_apis/git/repositories/{repo_id}/refs/heads/dev?api-version=7.1-preview.1"
+            
+            req_dev = urllib.request.Request(dev_url)
+            req_dev.add_header("Authorization", f"Basic {encoded_credentials}")
+            req_dev.add_header("Content-Type", "application/json")
+            
+            with urllib.request.urlopen(req_dev) as response:
+                dev_data = json.loads(response.read().decode())
+                sha = dev_data["value"][0]["objectId"]
+                logging.info(f"Got dev branch SHA: {sha}")
+            
+            # 2️⃣ Branch'in var olup olmadığını kontrol et
             check_url = f"https://dev.azure.com/{AZURE_ORG}/{AZURE_PROJECT}/_apis/git/repositories/{repo_id}/refs/heads/{ticket}?api-version=7.1-preview.1"
             
             req_check = urllib.request.Request(check_url)
@@ -126,8 +138,7 @@ def new_branch(req: func.HttpRequest) -> func.HttpResponse:
             
             try:
                 with urllib.request.urlopen(req_check) as response:
-                    # Branch zaten var
-                    logging.info(f"Branch '{ticket}' already exists")
+                    # Branch zaten var - 200 response geldi
                     return func.HttpResponse(
                         json.dumps({
                             "status": "BRANCH_CONFLICT",
@@ -142,29 +153,12 @@ def new_branch(req: func.HttpRequest) -> func.HttpResponse:
                     )
             except urllib.error.HTTPError as check_error:
                 if check_error.code == 404:
-                    # Branch yok, oluşturabiliriz
-                    logging.info(f"Branch '{ticket}' does not exist, proceeding with creation")
+                    # Branch yok, oluşturabiliriz - bu normaldir
+                    pass
                 else:
-                    # 404 olmayan bir hata varsa
+                    # Başka bir hata
                     error_msg = check_error.read().decode() if check_error.fp else str(check_error)
                     logging.error(f"Branch check failed: {check_error.code} - {error_msg}")
-                    return func.HttpResponse(
-                        json.dumps({"error": "Failed to check branch existence", "details": error_msg}),
-                        status_code=500,
-                        mimetype="application/json"
-                    )
-            
-            # 2️⃣ Dev branch'in SHA'sını al
-            dev_url = f"https://dev.azure.com/{AZURE_ORG}/{AZURE_PROJECT}/_apis/git/repositories/{repo_id}/refs/heads/dev?api-version=7.1-preview.1"
-            
-            req_dev = urllib.request.Request(dev_url)
-            req_dev.add_header("Authorization", f"Basic {encoded_credentials}")
-            req_dev.add_header("Content-Type", "application/json")
-            
-            with urllib.request.urlopen(req_dev) as response:
-                dev_data = json.loads(response.read().decode())
-                sha = dev_data["value"][0]["objectId"]
-                logging.info(f"Got dev branch SHA: {sha}")
             
             # 3️⃣ Yeni branch oluştur
             create_url = f"https://dev.azure.com/{AZURE_ORG}/{AZURE_PROJECT}/_apis/git/repositories/{repo_id}/refs?api-version=7.1-preview.1"
