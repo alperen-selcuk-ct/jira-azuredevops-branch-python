@@ -1,4 +1,19 @@
-import azure.functions as func
+@app.function_name(name="CodeReviewTransition")
+//... existing code ...
+        # 2. Branch SHA'larını Al
+        try:
+            source_ref_data = do_request(f"https://dev.azure.com/{AZURE_ORG}/{AZURE_PROJECT}/_apis/git/repositories/{repo_id}/refs?filter=heads/{ticket}&api-version=7.1-preview.1")
+            target_ref_data = do_request(f"https://dev.azure.com/{AZURE_ORG}/{AZURE_PROJECT}/_apis/git/repositories/{repo_id}/refs?filter=heads/dev&api-version=7.1-preview.1")
+
+            source_sha = (source_ref_data.get('value') or [{}])[0].get('objectId')
+            target_sha = (target_ref_data.get('value') or [{}])[0].get('objectId')
+
+            if not source_sha or not target_sha:
+                raise ValueError("Could not retrieve valid SHA for source or target branch.")
+
+        except (IndexError, KeyError, urllib.error.HTTPError, ValueError) as e:
+            return func.HttpResponse(json.dumps({"status": "BRANCH_NOT_FOUND", "message": "❌ Source or dev branch not found or SHA could not be retrieved.", "error": str(e), "success": False}), status_code=404, mimetype="application/json")
+//... existing code ...import azure.functions as func
 import logging
 import os
 import json
@@ -470,13 +485,17 @@ def code_review_transition(req: func.HttpRequest) -> func.HttpResponse:
 
         # 2. Branch SHA'larını Al
         try:
-            source_ref = do_request(f"https://dev.azure.com/{AZURE_ORG}/{AZURE_PROJECT}/_apis/git/repositories/{repo_id}/refs?filter=heads/{ticket}&api-version=7.1-preview.1")
-            target_ref = do_request(f"https://dev.azure.com/{AZURE_ORG}/{AZURE_PROJECT}/_apis/git/repositories/{repo_id}/refs?filter=heads/dev&api-version=7.1-preview.1")
-            
-            source_sha = source_ref['value'][0]['objectId']
-            target_sha = target_ref['value'][0]['objectId']
-        except (IndexError, KeyError, urllib.error.HTTPError) as e:
-            return func.HttpResponse(json.dumps({"status": "BRANCH_NOT_FOUND", "message": "❌ Source or dev branch not found.", "error": str(e), "success": False}), status_code=404, mimetype="application/json")
+            source_ref_data = do_request(f"https://dev.azure.com/{AZURE_ORG}/{AZURE_PROJECT}/_apis/git/repositories/{repo_id}/refs?filter=heads/{ticket}&api-version=7.1-preview.1")
+            target_ref_data = do_request(f"https://dev.azure.com/{AZURE_ORG}/{AZURE_PROJECT}/_apis/git/repositories/{repo_id}/refs?filter=heads/dev&api-version=7.1-preview.1")
+
+            source_sha = (source_ref_data.get('value') or [{}])[0].get('objectId')
+            target_sha = (target_ref_data.get('value') or [{}])[0].get('objectId')
+
+            if not source_sha or not target_sha:
+                raise ValueError("Could not retrieve valid SHA for source or target branch.")
+
+        except (IndexError, KeyError, urllib.error.HTTPError, ValueError) as e:
+            return func.HttpResponse(json.dumps({"status": "BRANCH_NOT_FOUND", "message": "❌ Source or dev branch not found or SHA could not be retrieved.", "error": str(e), "success": False}), status_code=404, mimetype="application/json")
 
         # 3. Merge Conflict Kontrolü (PR açmadan)
         try:
