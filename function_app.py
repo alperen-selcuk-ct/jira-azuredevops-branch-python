@@ -425,3 +425,107 @@ def delete_branch(req: func.HttpRequest) -> func.HttpResponse:
 def healthcheck(req: func.HttpRequest) -> func.HttpResponse:
     logging.info('HealthCheck function called.')
     return func.HttpResponse("OK - All systems working!")
+
+
+@app.function_name(name="CodeReviewTransition")
+@app.route(route="codeReviewTransition", methods=["get"], auth_level=func.AuthLevel.ANONYMOUS)
+def code_review_transition(req: func.HttpRequest) -> func.HttpResponse:
+    """
+    Jira 'In Development' -> 'Code Review' geçişi tetiklendiğinde çağrılır.
+    1. Feature branch (ticket) -> dev otomatik merge (branch silinmez)
+       - Conflict varsa işlemi durdur ve hata döndür.
+    2. Aynı feature branch -> test branch'ine PR aç.
+    """
+    logging.info('CodeReviewTransition function called.')
+    
+    try:
+        ticket = req.params.get('ticket')
+        repo_name = req.params.get('repo')
+
+        # 1. Parametre ve PAT Kontrolleri
+        if not ticket or not repo_name:
+            return func.HttpResponse(json.dumps({"status": "MISSING_PARAMETERS", "message": "❌ 'ticket' and 'repo' parameters are required", "success": False}), status_code=400, mimetype="application/json")
+        
+        if repo_name not in REPO_MAP:
+            return func.HttpResponse(json.dumps({"status": "INVALID_REPO", "message": f"❌ Unknown repository '{repo_name}'", "success": False}), status_code=400, mimetype="application/json")
+
+        azure_pat = os.environ.get("AZURE_PAT")
+        if not azure_pat:
+            return func.HttpResponse(json.dumps({"error": "AZURE_PAT environment variable not set"}), status_code=500, mimetype="application/json")
+
+        repo_id = REPO_MAP[repo_name]
+        
+        import urllib.request, urllib.error, base64
+
+        credentials = f":{azure_pat}"
+        encoded_credentials = base64.b64encode(credentials.encode()).decode()
+        auth_header = {"Authorization": f"Basic {encoded_credentials}", "Content-Type": "application/json"}
+
+        def do_request(url: str, method: str = 'GET', payload=None):
+            data = json.dumps(payload).encode() if payload is not None else None
+            req_obj = urllib.request.Request(url, data=data, method=method, headers=auth_header)
+            with urllib.request.urlopen(req_obj) as resp:
+                txt = resp.read().decode()
+                return json.loads(txt) if txt else None
+
+        # 2. Branch SHA'larını Al
+        try:
+            source_ref = do_request(f"https://dev.azure.com/{AZURE_ORG}/{AZURE_PROJECT}/_apis/git/repositories/{repo_id}/refs?filter=heads/{ticket}&api-version=7.1-preview.1")
+            target_ref = do_request(f"https://dev.azure.com/{AZURE_ORG}/{AZURE_PROJECT}/_apis/git/repositories/{repo_id}/refs?filter=heads/dev&api-version=7.1-preview.1")
+            
+            source_sha = source_ref['value'][0]['objectId']
+            target_sha = target_ref['value'][0]['objectId']
+        except (IndexError, KeyError, urllib.error.HTTPError) as e:
+            return func.HttpResponse(json.dumps({"status": "BRANCH_NOT_FOUND", "message": "❌ Source or dev branch not found.", "error": str(e), "success": False}), status_code=404, mimetype="application/json")
+
+        # 3. Merge Conflict Kontrolü (PR açmadan)
+        try:
+            merge_check_url = f"https://dev.azure.com/{AZURE_ORG}/{AZURE_PROJECT}/_apis/git/repositories/{repo_id}/merges?api-version=7.1-preview.1"
+            merge_check_payload = {"parents": [source_sha, target_sha]}
+            merge_commit = do_request(merge_check_url, method='POST', payload=merge_check_payload)
+            new_merge_commit_sha = merge_commit['commitId']
+        except urllib.error.HTTPError as e:
+            if e.code == 409: # Conflict
+                return func.HttpResponse(json.dumps({"status": "MERGE_CONFLICT", "message": f"⚠️ Merge conflict: '{ticket}' cannot be merged into dev.", "success": False}), status_code=409, mimetype="application/json")
+            else:
+                raise
+
+        # 4. 'dev' Branch'ini Güncelle (Merge işlemini tamamla)
+        update_ref_url = f"https://dev.azure.com/{AZURE_ORG}/{AZURE_PROJECT}/_apis/git/repositories/{repo_id}/refs?api-version=7.1-preview.1"
+        update_payload = [{
+            "name": "refs/heads/dev",
+            "oldObjectId": target_sha,
+            "newObjectId": new_merge_commit_sha
+        }]
+        do_request(update_ref_url, method='POST', payload=update_payload)
+        logging.info(f"Successfully merged '{ticket}' into dev. New dev SHA: {new_merge_commit_sha}")
+
+        # 5. 'test' Branch'ine PR Aç
+        pr_create_url = f"https://dev.azure.com/{AZURE_ORG}/{AZURE_PROJECT}/_apis/git/repositories/{repo_id}/pullrequests?api-version=7.1-preview.1"
+        pr_payload_test = {
+            "sourceRefName": f"refs/heads/{ticket}",
+            "targetRefName": "refs/heads/test",
+            "title": f"Code Review: {ticket} -> test",
+            "description": f"Automated PR from '{ticket}' to 'test' after successful merge into 'dev'."
+        }
+        test_pr = do_request(pr_create_url, method='POST', payload=pr_payload_test)
+        test_pr_id = test_pr.get("pullRequestId")
+        logging.info(f"Successfully created PR to test: #{test_pr_id}")
+
+        # 6. Başarılı Sonuç
+        resp = {
+            "status": "CODE_REVIEW_OK",
+            "message": f"✅ Merged '{ticket}' into dev and opened PR to test.",
+            "branch": ticket,
+            "repo": repo_name,
+            "dev_merge_commit": new_merge_commit_sha,
+            "test_pr_id": test_pr_id,
+            "test_pr_url": f"https://dev.azure.com/{AZURE_ORG}/{AZURE_PROJECT}/_git/{repo_name}/pullrequest/{test_pr_id}",
+            "success": True
+        }
+        return func.HttpResponse(json.dumps(resp), status_code=200, mimetype="application/json")
+
+    except Exception as e:
+        logging.error(f"Unexpected error in CodeReviewTransition: {str(e)}")
+        return func.HttpResponse(json.dumps({"status": "UNEXPECTED_ERROR", "message": "❌ Unexpected failure", "error": str(e), "success": False}), status_code=500, mimetype="application/json")
+
