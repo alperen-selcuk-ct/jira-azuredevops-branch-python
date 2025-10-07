@@ -510,7 +510,10 @@ def code_review_transition(req: func.HttpRequest) -> func.HttpResponse:
         # Merge Conflict Kontrolü ve Sanal Merge
         try:
             merge_check_url = f"https://dev.azure.com/{AZURE_ORG}/{AZURE_PROJECT}/_apis/git/repositories/{repo_id}/merges?api-version=7.1-preview.1"
-            merge_check_payload = {"parents": [source_sha, target_sha]}
+            merge_check_payload = {
+                "parents": [source_sha, target_sha],
+                "comment": f"Auto-merge: {ticket} -> dev (Code Review transition)"
+            }
             merge_commit = _cr_do_request(merge_check_url, method='POST', payload=merge_check_payload)
             new_merge_commit_sha = merge_commit['commitId']
         except urllib.error.HTTPError as e:
