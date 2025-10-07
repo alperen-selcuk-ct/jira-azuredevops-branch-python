@@ -77,24 +77,43 @@ def new_branch(req: func.HttpRequest) -> func.HttpResponse:
                 mimetype="application/json"
             )
         
-        # REGEX kontrolü - BASIT STRING KONTROL
-        # Format: AI-123-feature-name veya BE-456-fix-bug
+        # REGEX kontrolü - FOLDER/BRANCH formatını da destekle
+        # Format: AI-123-feature-name veya herhangi-folder/AI-123-feature-name
         ticket_upper = ticket.upper()
         valid_prefixes = ["AI-", "BE-", "CT-", "DO-", "FE-", "MP-", "SQL-", "TD-", "UI-"]
         
-        if not any(ticket_upper.startswith(prefix) for prefix in valid_prefixes):
-            return func.HttpResponse(
-                json.dumps({
-                    "status": "BRANCH_NAME_WRONG",
-                    "message": f"❌ BRANCH NAME ERROR: '{ticket}' format is invalid",
-                    "error": f"Ticket must start with valid prefix: {', '.join(valid_prefixes)}",
-                    "example": "AI-123-feature-name",
-                    "ticket": ticket,
-                    "success": False
-                }),
-                status_code=400,
-                mimetype="application/json"
-            )
+        # Folder varsa son kısmı kontrol et, yoksa direkt kontrol et
+        if '/' in ticket:
+            # folder/branch formatı: herhangi-folder/AI-123-feature -> AI-123-feature kısmını kontrol et
+            branch_part = ticket.split('/')[-1].upper()
+            if not any(branch_part.startswith(prefix) for prefix in valid_prefixes):
+                return func.HttpResponse(
+                    json.dumps({
+                        "status": "BRANCH_NAME_WRONG",
+                        "message": f"❌ BRANCH NAME ERROR: '{ticket}' format is invalid",
+                        "error": f"Branch part '{branch_part}' must start with valid prefix: {', '.join(valid_prefixes)}",
+                        "example": "developer/AI-123-feature-name or AI-123-feature-name",
+                        "ticket": ticket,
+                        "success": False
+                    }),
+                    status_code=400,
+                    mimetype="application/json"
+                )
+        else:
+            # Direkt branch formatı: AI-123-feature
+            if not any(ticket_upper.startswith(prefix) for prefix in valid_prefixes):
+                return func.HttpResponse(
+                    json.dumps({
+                        "status": "BRANCH_NAME_WRONG",
+                        "message": f"❌ BRANCH NAME ERROR: '{ticket}' format is invalid",
+                        "error": f"Ticket must start with valid prefix: {', '.join(valid_prefixes)}",
+                        "example": "AI-123-feature-name",
+                        "ticket": ticket,
+                        "success": False
+                    }),
+                    status_code=400,
+                    mimetype="application/json"
+                )
         
         # AZURE_PAT kontrolü
         azure_pat = os.environ.get("AZURE_PAT")
