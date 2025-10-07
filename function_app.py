@@ -118,7 +118,9 @@ def new_branch(req: func.HttpRequest) -> func.HttpResponse:
         
         try:
             # 0️⃣ Branch'in zaten var olup olmadığını kontrol et (Azure DevOps bazı durumlarda duplicate create'e hata döndürmeyebiliyor)
-            existing_url = f"https://dev.azure.com/{AZURE_ORG}/{AZURE_PROJECT}/_apis/git/repositories/{repo_id}/refs/heads/{ticket}?api-version=7.1-preview.1"
+            # URL encode ticket name for proper API call
+            encoded_ticket = urllib.parse.quote(ticket, safe='')
+            existing_url = f"https://dev.azure.com/{AZURE_ORG}/{AZURE_PROJECT}/_apis/git/repositories/{repo_id}/refs/heads/{encoded_ticket}?api-version=7.1-preview.1"
             existing_req = urllib.request.Request(existing_url)
             existing_req.add_header("Authorization", f"Basic {encoded_credentials}")
             existing_req.add_header("Content-Type", "application/json")
@@ -316,7 +318,9 @@ def delete_branch(req: func.HttpRequest) -> func.HttpResponse:
         
         try:
             # 1️⃣ Önce branch'in var olup olmadığını kontrol et
-            check_url = f"https://dev.azure.com/{AZURE_ORG}/{AZURE_PROJECT}/_apis/git/repositories/{repo_id}/refs/heads/{ticket}?api-version=7.1-preview.1"
+            # URL encode ticket name for proper API call
+            encoded_ticket = urllib.parse.quote(ticket, safe='')
+            check_url = f"https://dev.azure.com/{AZURE_ORG}/{AZURE_PROJECT}/_apis/git/repositories/{repo_id}/refs/heads/{encoded_ticket}?api-version=7.1-preview.1"
             
             req_check = urllib.request.Request(check_url)
             req_check.add_header("Authorization", f"Basic {encoded_credentials}")
@@ -425,3 +429,110 @@ def delete_branch(req: func.HttpRequest) -> func.HttpResponse:
 def healthcheck(req: func.HttpRequest) -> func.HttpResponse:
     logging.info('HealthCheck function called.')
     return func.HttpResponse("OK - All systems working!")
+
+
+@app.function_name(name="CodeReviewTransition")
+@app.route(route="codeReviewTransition", methods=["get"], auth_level=func.AuthLevel.ANONYMOUS)
+def code_review_transition(req: func.HttpRequest) -> func.HttpResponse:
+    """
+    Jira 'In Development' -> 'Code Review' geçişi için:
+    1. Feature branch'i 'dev'e merge eder (conflict yoksa).
+    2. Feature branch'ten 'test'e PR açar.
+    """
+    logging.info('CodeReviewTransition function called.')
+    
+    try:
+        ticket = req.params.get('ticket')
+        repo_name = req.params.get('repo')
+
+        # --- 1. Parametre ve Ortam Değişkeni Kontrolleri ---
+        if not ticket or not repo_name:
+            return func.HttpResponse(json.dumps({"status": "MISSING_PARAMETERS", "message": "❌ 'ticket' and 'repo' parameters are required"}), status_code=400, mimetype="application/json")
+        
+        if repo_name not in REPO_MAP:
+            return func.HttpResponse(json.dumps({"status": "INVALID_REPO", "message": f"❌ Unknown repository '{repo_name}'"}), status_code=400, mimetype="application/json")
+
+        azure_pat = os.environ.get("AZURE_PAT")
+        if not azure_pat:
+            return func.HttpResponse(json.dumps({"error": "AZURE_PAT environment variable not set"}), status_code=500, mimetype="application/json")
+
+        repo_id = REPO_MAP[repo_name]
+        
+        # --- 2. İzole Yardımcı Fonksiyonlar ---
+        import urllib.request, urllib.error, urllib.parse, base64
+
+        def _cr_do_request(url: str, method: str = 'GET', payload: dict = None) -> dict:
+            """Bu fonksiyona özel, izole request yardımcısı."""
+            headers = {
+                "Authorization": f"Basic {base64.b64encode(f':{azure_pat}'.encode()).decode()}",
+                "Content-Type": "application/json"
+            }
+            data = json.dumps(payload).encode() if payload is not None else None
+            req_obj = urllib.request.Request(url, data=data, method=method, headers=headers)
+            with urllib.request.urlopen(req_obj) as resp:
+                txt = resp.read().decode()
+                return json.loads(txt) if txt else {}
+
+        def _cr_get_branch_sha(branch_name: str) -> str:
+            """Bu fonksiyona özel, izole SHA alma yardımcısı."""
+            # URL encode branch name for proper API call
+            encoded_branch = urllib.parse.quote(branch_name, safe='')
+            url = f"https://dev.azure.com/{AZURE_ORG}/{AZURE_PROJECT}/_apis/git/repositories/{repo_id}/refs?filter=heads/{encoded_branch}&api-version=7.1-preview.1"
+            refs = _cr_do_request(url)
+            if 'value' in refs and len(refs['value']) > 0:
+                return refs['value'][0]['objectId']
+            raise ValueError(f"Branch '{branch_name}' not found or SHA could not be retrieved.")
+
+        # --- 3. Ana Akış ---
+        # Branch SHA'larını al
+        source_sha = _cr_get_branch_sha(ticket)
+        target_sha = _cr_get_branch_sha('dev')
+
+        # Merge Conflict Kontrolü ve Sanal Merge
+        try:
+            merge_check_url = f"https://dev.azure.com/{AZURE_ORG}/{AZURE_PROJECT}/_apis/git/repositories/{repo_id}/merges?api-version=7.1-preview.1"
+            merge_check_payload = {"parents": [source_sha, target_sha]}
+            merge_commit = _cr_do_request(merge_check_url, method='POST', payload=merge_check_payload)
+            new_merge_commit_sha = merge_commit['commitId']
+        except urllib.error.HTTPError as e:
+            if e.code == 409: # Conflict
+                return func.HttpResponse(json.dumps({"status": "MERGE_CONFLICT", "message": f"⚠️ Merge conflict: '{ticket}' cannot be merged into dev."}), status_code=409, mimetype="application/json")
+            raise
+
+        # 'dev' Branch'ini Güncelle (Merge işlemini tamamla)
+        update_ref_url = f"https://dev.azure.com/{AZURE_ORG}/{AZURE_PROJECT}/_apis/git/repositories/{repo_id}/refs?api-version=7.1-preview.1"
+        update_payload = [{"name": "refs/heads/dev", "oldObjectId": target_sha, "newObjectId": new_merge_commit_sha}]
+        _cr_do_request(update_ref_url, method='POST', payload=update_payload)
+        logging.info(f"Successfully merged '{ticket}' into dev. New dev SHA: {new_merge_commit_sha}")
+
+        # 'test' Branch'ine PR Aç
+        pr_create_url = f"https://dev.azure.com/{AZURE_ORG}/{AZURE_PROJECT}/_apis/git/repositories/{repo_id}/pullrequests?api-version=7.1-preview.1"
+        pr_payload_test = {
+            "sourceRefName": f"refs/heads/{ticket}",
+            "targetRefName": "refs/heads/test",
+            "title": f"Code Review: {ticket} -> test",
+            "description": f"Automated PR from '{ticket}' to 'test' after successful merge into 'dev'."
+        }
+        test_pr = _cr_do_request(pr_create_url, method='POST', payload=pr_payload_test)
+        test_pr_id = test_pr.get("pullRequestId")
+        logging.info(f"Successfully created PR to test: #{test_pr_id}")
+
+        # Başarılı Sonuç
+        resp = {
+            "status": "CODE_REVIEW_OK",
+            "message": f"✅ Merged '{ticket}' into dev and opened PR to test.",
+            "dev_merge_commit": new_merge_commit_sha,
+            "test_pr_id": test_pr_id,
+            "test_pr_url": f"https://dev.azure.com/{AZURE_ORG}/{AZURE_PROJECT}/_git/{repo_name}/pullrequest/{test_pr_id}"
+        }
+        return func.HttpResponse(json.dumps(resp), status_code=200, mimetype="application/json")
+
+    except (ValueError, urllib.error.HTTPError) as e:
+        error_message = str(e)
+        if isinstance(e, urllib.error.HTTPError):
+            error_message = e.read().decode()
+        logging.error(f"Error in CodeReviewTransition: {error_message}")
+        return func.HttpResponse(json.dumps({"status": "EXECUTION_ERROR", "message": "❌ An error occurred during execution.", "error": error_message}), status_code=500, mimetype="application/json")
+    except Exception as e:
+        logging.error(f"Unexpected error in CodeReviewTransition: {str(e)}")
+        return func.HttpResponse(json.dumps({"status": "UNEXPECTED_ERROR", "message": "❌ An unexpected error occurred."}), status_code=500, mimetype="application/json")
