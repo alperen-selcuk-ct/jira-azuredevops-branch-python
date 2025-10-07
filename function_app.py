@@ -506,26 +506,21 @@ def code_review_transition(req: func.HttpRequest) -> func.HttpResponse:
         # Branch SHA'larını al
         source_sha = _cr_get_branch_sha(ticket)
         target_sha = _cr_get_branch_sha('dev')
-
-        # Merge Conflict Kontrolü ve Sanal Merge
-        try:
-            merge_check_url = f"https://dev.azure.com/{AZURE_ORG}/{AZURE_PROJECT}/_apis/git/repositories/{repo_id}/merges?api-version=7.1-preview.1"
-            merge_check_payload = {
-                "parents": [source_sha, target_sha],
-                "comment": f"Auto-merge: {ticket} -> dev (Code Review transition)"
-            }
-            merge_commit = _cr_do_request(merge_check_url, method='POST', payload=merge_check_payload)
-            new_merge_commit_sha = merge_commit['commitId']
-        except urllib.error.HTTPError as e:
-            if e.code == 409: # Conflict
-                return func.HttpResponse(json.dumps({"status": "MERGE_CONFLICT", "message": f"⚠️ Merge conflict: '{ticket}' cannot be merged into dev."}), status_code=409, mimetype="application/json")
-            raise
-
-        # 'dev' Branch'ini Güncelle (Merge işlemini tamamla)
-        update_ref_url = f"https://dev.azure.com/{AZURE_ORG}/{AZURE_PROJECT}/_apis/git/repositories/{repo_id}/refs?api-version=7.1-preview.1"
-        update_payload = [{"name": "refs/heads/dev", "oldObjectId": target_sha, "newObjectId": new_merge_commit_sha}]
-        _cr_do_request(update_ref_url, method='POST', payload=update_payload)
-        logging.info(f"Successfully merged '{ticket}' into dev. New dev SHA: {new_merge_commit_sha}")
+        
+        # Eğer branch'ler aynı SHA'ya sahipse, merge gerekli değil
+        if source_sha == target_sha:
+            logging.info(f"Branch '{ticket}' already up to date with dev")
+        else:
+            # 'dev' Branch'ini direkt güncelle (fast-forward merge)
+            update_ref_url = f"https://dev.azure.com/{AZURE_ORG}/{AZURE_PROJECT}/_apis/git/repositories/{repo_id}/refs?api-version=7.1-preview.1"
+            update_payload = [{"name": "refs/heads/dev", "oldObjectId": target_sha, "newObjectId": source_sha}]
+            try:
+                _cr_do_request(update_ref_url, method='POST', payload=update_payload)
+                logging.info(f"Successfully fast-forward merged '{ticket}' into dev. New dev SHA: {source_sha}")
+            except urllib.error.HTTPError as merge_err:
+                if merge_err.code == 409:
+                    return func.HttpResponse(json.dumps({"status": "MERGE_CONFLICT", "message": f"⚠️ Merge conflict: '{ticket}' cannot be fast-forward merged into dev. Manual merge required."}), status_code=409, mimetype="application/json")
+                raise
 
         # 'test' Branch'ine PR Aç
         pr_create_url = f"https://dev.azure.com/{AZURE_ORG}/{AZURE_PROJECT}/_apis/git/repositories/{repo_id}/pullrequests?api-version=7.1-preview.1"
@@ -543,7 +538,7 @@ def code_review_transition(req: func.HttpRequest) -> func.HttpResponse:
         resp = {
             "status": "CODE_REVIEW_OK",
             "message": f"✅ Merged '{ticket}' into dev and opened PR to test.",
-            "dev_merge_commit": new_merge_commit_sha,
+            "dev_new_sha": source_sha,
             "test_pr_id": test_pr_id,
             "test_pr_url": f"https://dev.azure.com/{AZURE_ORG}/{AZURE_PROJECT}/_git/{repo_name}/pullrequest/{test_pr_id}"
         }
