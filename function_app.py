@@ -412,15 +412,14 @@ def healthcheck(req: func.HttpRequest) -> func.HttpResponse:
     return func.HttpResponse("OK - All systems working!")
 
 
-@app.function_name(name="CodeReviewTransition")
-@app.route(route="codeReviewTransition", methods=["get"], auth_level=func.AuthLevel.ANONYMOUS)
-def code_review_transition(req: func.HttpRequest) -> func.HttpResponse:
+@app.function_name(name="DevMerge")
+@app.route(route="devmerge", methods=["get"], auth_level=func.AuthLevel.ANONYMOUS)
+def dev_merge(req: func.HttpRequest) -> func.HttpResponse:
     """
-    Jira 'In Development' -> 'Code Review' geçişi için:
-    1. Feature branch'i 'dev'e merge eder (conflict yoksa).
-    2. Feature branch'ten 'test'e PR açar.
+    Feature branch'i 'dev' branch'ine merge eder (branch'i silmez).
+    Hem 'In Development -> Code Review' hem 'Code Review -> Analyst Appr.' için kullanılır.
     """
-    logging.info('CodeReviewTransition function called.')
+    logging.info('DevMerge function called.')
     
     try:
         ticket = req.params.get('ticket')
@@ -442,8 +441,8 @@ def code_review_transition(req: func.HttpRequest) -> func.HttpResponse:
         # --- 2. İzole Yardımcı Fonksiyonlar ---
         import urllib.request, urllib.error, urllib.parse, base64
 
-        def _cr_do_request(url: str, method: str = 'GET', payload: dict = None) -> dict:
-            """Bu fonksiyona özel, izole request yardımcısı."""
+        def _dm_do_request(url: str, method: str = 'GET', payload: dict = None) -> dict:
+            """DevMerge fonksiyonuna özel request yardımcısı."""
             headers = {
                 "Authorization": f"Basic {base64.b64encode(f':{azure_pat}'.encode()).decode()}",
                 "Content-Type": "application/json"
@@ -454,55 +453,50 @@ def code_review_transition(req: func.HttpRequest) -> func.HttpResponse:
                 txt = resp.read().decode()
                 return json.loads(txt) if txt else {}
 
-        def _cr_get_branch_sha(branch_name: str) -> str:
-            """Bu fonksiyona özel, izole SHA alma yardımcısı."""
-            # URL encode branch name for proper API call
+        def _dm_get_branch_sha(branch_name: str) -> str:
+            """DevMerge fonksiyonuna özel SHA alma yardımcısı."""
             encoded_branch = urllib.parse.quote(branch_name, safe='')
             url = f"https://dev.azure.com/{AZURE_ORG}/{AZURE_PROJECT}/_apis/git/repositories/{repo_id}/refs?filter=heads/{encoded_branch}&api-version=7.1-preview.1"
-            refs = _cr_do_request(url)
+            refs = _dm_do_request(url)
             if 'value' in refs and len(refs['value']) > 0:
                 return refs['value'][0]['objectId']
             raise ValueError(f"Branch '{branch_name}' not found or SHA could not be retrieved.")
 
         # --- 3. Ana Akış ---
         # Branch SHA'larını al
-        source_sha = _cr_get_branch_sha(ticket)
-        target_sha = _cr_get_branch_sha('dev')
+        source_sha = _dm_get_branch_sha(ticket)
+        target_sha = _dm_get_branch_sha('dev')
         
         # Eğer branch'ler aynı SHA'ya sahipse, merge gerekli değil
         if source_sha == target_sha:
             logging.info(f"Branch '{ticket}' already up to date with dev")
+            return func.HttpResponse(json.dumps({
+                "status": "ALREADY_UP_TO_DATE",
+                "message": f"✅ Branch '{ticket}' is already up to date with dev.",
+                "branch": ticket,
+                "repo": repo_name,
+                "dev_sha": target_sha
+            }), status_code=200, mimetype="application/json")
         else:
             # 'dev' Branch'ini direkt güncelle (fast-forward merge)
             update_ref_url = f"https://dev.azure.com/{AZURE_ORG}/{AZURE_PROJECT}/_apis/git/repositories/{repo_id}/refs?api-version=7.1-preview.1"
             update_payload = [{"name": "refs/heads/dev", "oldObjectId": target_sha, "newObjectId": source_sha}]
             try:
-                _cr_do_request(update_ref_url, method='POST', payload=update_payload)
+                _dm_do_request(update_ref_url, method='POST', payload=update_payload)
                 logging.info(f"Successfully fast-forward merged '{ticket}' into dev. New dev SHA: {source_sha}")
             except urllib.error.HTTPError as merge_err:
                 if merge_err.code == 409:
                     return func.HttpResponse(json.dumps({"status": "MERGE_CONFLICT", "message": f"⚠️ Merge conflict: '{ticket}' cannot be fast-forward merged into dev. Manual merge required."}), status_code=409, mimetype="application/json")
                 raise
 
-        # 'test' Branch'ine PR Aç
-        pr_create_url = f"https://dev.azure.com/{AZURE_ORG}/{AZURE_PROJECT}/_apis/git/repositories/{repo_id}/pullrequests?api-version=7.1-preview.1"
-        pr_payload_test = {
-            "sourceRefName": f"refs/heads/{ticket}",
-            "targetRefName": "refs/heads/test",
-            "title": f"Code Review: {ticket} -> test",
-            "description": f"Automated PR from '{ticket}' to 'test' after successful merge into 'dev'."
-        }
-        test_pr = _cr_do_request(pr_create_url, method='POST', payload=pr_payload_test)
-        test_pr_id = test_pr.get("pullRequestId")
-        logging.info(f"Successfully created PR to test: #{test_pr_id}")
-
         # Başarılı Sonuç
         resp = {
-            "status": "CODE_REVIEW_OK",
-            "message": f"✅ Merged '{ticket}' into dev and opened PR to test.",
-            "dev_new_sha": source_sha,
-            "test_pr_id": test_pr_id,
-            "test_pr_url": f"https://dev.azure.com/{AZURE_ORG}/{AZURE_PROJECT}/_git/{repo_name}/pullrequest/{test_pr_id}"
+            "status": "DEV_MERGE_OK",
+            "message": f"✅ Successfully merged '{ticket}' into dev.",
+            "branch": ticket,
+            "repo": repo_name,
+            "dev_old_sha": target_sha,
+            "dev_new_sha": source_sha
         }
         return func.HttpResponse(json.dumps(resp), status_code=200, mimetype="application/json")
 
@@ -510,8 +504,197 @@ def code_review_transition(req: func.HttpRequest) -> func.HttpResponse:
         error_message = str(e)
         if isinstance(e, urllib.error.HTTPError):
             error_message = e.read().decode()
-        logging.error(f"Error in CodeReviewTransition: {error_message}")
+        logging.error(f"Error in DevMerge: {error_message}")
         return func.HttpResponse(json.dumps({"status": "EXECUTION_ERROR", "message": "❌ An error occurred during execution.", "error": error_message}), status_code=500, mimetype="application/json")
     except Exception as e:
-        logging.error(f"Unexpected error in CodeReviewTransition: {str(e)}")
+        logging.error(f"Unexpected error in DevMerge: {str(e)}")
+        return func.HttpResponse(json.dumps({"status": "UNEXPECTED_ERROR", "message": "❌ An unexpected error occurred."}), status_code=500, mimetype="application/json")
+
+
+@app.function_name(name="PrOpen")
+@app.route(route="propen", methods=["get"], auth_level=func.AuthLevel.ANONYMOUS)
+def pr_open(req: func.HttpRequest) -> func.HttpResponse:
+    """
+    Feature branch'ten 'test' branch'ine PR açar.
+    'In Development -> Code Review' workflow'u için kullanılır.
+    """
+    logging.info('PrOpen function called.')
+    
+    try:
+        ticket = req.params.get('ticket')
+        repo_name = req.params.get('repo')
+
+        # --- 1. Parametre ve Ortam Değişkeni Kontrolleri ---
+        if not ticket or not repo_name:
+            return func.HttpResponse(json.dumps({"status": "MISSING_PARAMETERS", "message": "❌ 'ticket' and 'repo' parameters are required"}), status_code=400, mimetype="application/json")
+        
+        if repo_name not in REPO_MAP:
+            return func.HttpResponse(json.dumps({"status": "INVALID_REPO", "message": f"❌ Unknown repository '{repo_name}'"}), status_code=400, mimetype="application/json")
+
+        azure_pat = os.environ.get("AZURE_PAT")
+        if not azure_pat:
+            return func.HttpResponse(json.dumps({"error": "AZURE_PAT environment variable not set"}), status_code=500, mimetype="application/json")
+
+        repo_id = REPO_MAP[repo_name]
+        
+        # --- 2. İzole Yardımcı Fonksiyonlar ---
+        import urllib.request, urllib.error, urllib.parse, base64
+
+        def _po_do_request(url: str, method: str = 'GET', payload: dict = None) -> dict:
+            """PrOpen fonksiyonuna özel request yardımcısı."""
+            headers = {
+                "Authorization": f"Basic {base64.b64encode(f':{azure_pat}'.encode()).decode()}",
+                "Content-Type": "application/json"
+            }
+            data = json.dumps(payload).encode() if payload is not None else None
+            req_obj = urllib.request.Request(url, data=data, method=method, headers=headers)
+            with urllib.request.urlopen(req_obj) as resp:
+                txt = resp.read().decode()
+                return json.loads(txt) if txt else {}
+
+        def _po_get_branch_sha(branch_name: str) -> str:
+            """PrOpen fonksiyonuna özel SHA alma yardımcısı."""
+            encoded_branch = urllib.parse.quote(branch_name, safe='')
+            url = f"https://dev.azure.com/{AZURE_ORG}/{AZURE_PROJECT}/_apis/git/repositories/{repo_id}/refs?filter=heads/{encoded_branch}&api-version=7.1-preview.1"
+            refs = _po_do_request(url)
+            if 'value' in refs and len(refs['value']) > 0:
+                return refs['value'][0]['objectId']
+            raise ValueError(f"Branch '{branch_name}' not found or SHA could not be retrieved.")
+
+        # --- 3. Ana Akış ---
+        # Branch'lerin varlığını kontrol et
+        try:
+            source_sha = _po_get_branch_sha(ticket)
+            test_sha = _po_get_branch_sha('test')
+        except ValueError as e:
+            if 'test' in str(e):
+                return func.HttpResponse(json.dumps({"status": "TARGET_BRANCH_NOT_FOUND", "message": "❌ Target branch 'test' does not exist in repository. Please create 'test' branch first."}), status_code=404, mimetype="application/json")
+            else:
+                return func.HttpResponse(json.dumps({"status": "SOURCE_BRANCH_NOT_FOUND", "message": f"❌ Source branch '{ticket}' does not exist in repository."}), status_code=404, mimetype="application/json")
+
+        # 'test' Branch'ine PR Aç
+        pr_create_url = f"https://dev.azure.com/{AZURE_ORG}/{AZURE_PROJECT}/_apis/git/repositories/{repo_id}/pullrequests?api-version=7.1-preview.1"
+        pr_payload_test = {
+            "sourceRefName": f"refs/heads/{ticket}",
+            "targetRefName": "refs/heads/test",
+            "title": f"Code Review: {ticket} -> test",
+            "description": f"Automated PR from '{ticket}' to 'test' for code review process."
+        }
+        test_pr = _po_do_request(pr_create_url, method='POST', payload=pr_payload_test)
+        test_pr_id = test_pr.get("pullRequestId")
+        logging.info(f"Successfully created PR to test: #{test_pr_id}")
+
+        # Başarılı Sonuç
+        resp = {
+            "status": "PR_OPENED",
+            "message": f"✅ Successfully opened PR from '{ticket}' to test.",
+            "branch": ticket,
+            "repo": repo_name,
+            "pr_id": test_pr_id,
+            "pr_url": f"https://dev.azure.com/{AZURE_ORG}/{AZURE_PROJECT}/_git/{repo_name}/pullrequest/{test_pr_id}"
+        }
+        return func.HttpResponse(json.dumps(resp), status_code=200, mimetype="application/json")
+
+    except (ValueError, urllib.error.HTTPError) as e:
+        error_message = str(e)
+        if isinstance(e, urllib.error.HTTPError):
+            error_message = e.read().decode()
+        logging.error(f"Error in PrOpen: {error_message}")
+        return func.HttpResponse(json.dumps({"status": "EXECUTION_ERROR", "message": "❌ An error occurred during execution.", "error": error_message}), status_code=500, mimetype="application/json")
+    except Exception as e:
+        logging.error(f"Unexpected error in PrOpen: {str(e)}")
+        return func.HttpResponse(json.dumps({"status": "UNEXPECTED_ERROR", "message": "❌ An unexpected error occurred."}), status_code=500, mimetype="application/json")
+
+
+@app.function_name(name="PrApprove")
+@app.route(route="prapprove", methods=["get"], auth_level=func.AuthLevel.ANONYMOUS)
+def pr_approve(req: func.HttpRequest) -> func.HttpResponse:
+    """
+    PR'ı onaylar, test branch'ine merge eder ve feature branch'ini siler.
+    'Code Review -> Analyst Appr.' workflow'u için kullanılır.
+    """
+    logging.info('PrApprove function called.')
+    
+    try:
+        ticket = req.params.get('ticket')
+        repo_name = req.params.get('repo')
+        pr_id = req.params.get('pr_id')  # İsteğe bağlı, yoksa branch ismiyle bulur
+
+        # --- 1. Parametre ve Ortam Değişkeni Kontrolleri ---
+        if not ticket or not repo_name:
+            return func.HttpResponse(json.dumps({"status": "MISSING_PARAMETERS", "message": "❌ 'ticket' and 'repo' parameters are required"}), status_code=400, mimetype="application/json")
+        
+        if repo_name not in REPO_MAP:
+            return func.HttpResponse(json.dumps({"status": "INVALID_REPO", "message": f"❌ Unknown repository '{repo_name}'"}), status_code=400, mimetype="application/json")
+
+        azure_pat = os.environ.get("AZURE_PAT")
+        if not azure_pat:
+            return func.HttpResponse(json.dumps({"error": "AZURE_PAT environment variable not set"}), status_code=500, mimetype="application/json")
+
+        repo_id = REPO_MAP[repo_name]
+        
+        # --- 2. İzole Yardımcı Fonksiyonlar ---
+        import urllib.request, urllib.error, urllib.parse, base64
+
+        def _pa_do_request(url: str, method: str = 'GET', payload: dict = None) -> dict:
+            """PrApprove fonksiyonuna özel request yardımcısı."""
+            headers = {
+                "Authorization": f"Basic {base64.b64encode(f':{azure_pat}'.encode()).decode()}",
+                "Content-Type": "application/json"
+            }
+            data = json.dumps(payload).encode() if payload is not None else None
+            req_obj = urllib.request.Request(url, data=data, method=method, headers=headers)
+            with urllib.request.urlopen(req_obj) as resp:
+                txt = resp.read().decode()
+                return json.loads(txt) if txt else {}
+
+        # --- 3. Ana Akış ---
+        
+        # PR ID'si verilmediyse, branch ismiyle PR'ı bul
+        if not pr_id:
+            # Branch'ten test'e açık PR'ları ara
+            pr_list_url = f"https://dev.azure.com/{AZURE_ORG}/{AZURE_PROJECT}/_apis/git/repositories/{repo_id}/pullrequests?searchCriteria.sourceRefName=refs/heads/{urllib.parse.quote(ticket, safe='')}&searchCriteria.targetRefName=refs/heads/test&searchCriteria.status=active&api-version=7.1-preview.1"
+            pr_list = _pa_do_request(pr_list_url)
+            
+            if not pr_list.get('value') or len(pr_list['value']) == 0:
+                return func.HttpResponse(json.dumps({"status": "PR_NOT_FOUND", "message": f"❌ No active PR found from '{ticket}' to 'test' branch."}), status_code=404, mimetype="application/json")
+            
+            pr_id = pr_list['value'][0]['pullRequestId']
+            logging.info(f"Found PR #{pr_id} for branch '{ticket}'")
+
+        # PR'ı onayla ve merge et
+        pr_update_url = f"https://dev.azure.com/{AZURE_ORG}/{AZURE_PROJECT}/_apis/git/repositories/{repo_id}/pullrequests/{pr_id}?api-version=7.1-preview.1"
+        pr_update_payload = {
+            "status": "completed",
+            "lastMergeSourceCommit": {"commitId": ""},  # Azure DevOps otomatik dolduracak
+            "completionOptions": {
+                "mergeCommitMessage": f"Approved and merged: {ticket} -> test",
+                "deleteSourceBranch": True,  # Branch'i otomatik sil
+                "mergeStrategy": "squash"  # Squash merge
+            }
+        }
+        
+        pr_result = _pa_do_request(pr_update_url, method='PATCH', payload=pr_update_payload)
+        logging.info(f"Successfully approved and merged PR #{pr_id}")
+
+        # Başarılı Sonuç
+        resp = {
+            "status": "PR_APPROVED_AND_MERGED",
+            "message": f"✅ Successfully approved PR #{pr_id}, merged '{ticket}' to test, and deleted branch.",
+            "branch": ticket,
+            "repo": repo_name,
+            "pr_id": pr_id,
+            "pr_url": f"https://dev.azure.com/{AZURE_ORG}/{AZURE_PROJECT}/_git/{repo_name}/pullrequest/{pr_id}",
+            "merge_status": pr_result.get("mergeStatus", "completed")
+        }
+        return func.HttpResponse(json.dumps(resp), status_code=200, mimetype="application/json")
+
+    except (ValueError, urllib.error.HTTPError) as e:
+        error_message = str(e)
+        if isinstance(e, urllib.error.HTTPError):
+            error_message = e.read().decode()
+        logging.error(f"Error in PrApprove: {error_message}")
+        return func.HttpResponse(json.dumps({"status": "EXECUTION_ERROR", "message": "❌ An error occurred during execution.", "error": error_message}), status_code=500, mimetype="application/json")
+    except Exception as e:
+        logging.error(f"Unexpected error in PrApprove: {str(e)}")
         return func.HttpResponse(json.dumps({"status": "UNEXPECTED_ERROR", "message": "❌ An unexpected error occurred."}), status_code=500, mimetype="application/json")
