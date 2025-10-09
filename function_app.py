@@ -577,7 +577,7 @@ def pr_open(req: func.HttpRequest) -> func.HttpResponse:
         pr_payload_test = {
             "sourceRefName": f"refs/heads/{ticket}",
             "targetRefName": "refs/heads/test",
-            "title": f"Code Review: {ticket} -> test",
+            "title": f"{ticket}",
             "description": f"Automated PR from '{ticket}' to 'test' for code review process."
         }
         test_pr = _po_do_request(pr_create_url, method='POST', payload=pr_payload_test)
@@ -663,10 +663,18 @@ def pr_approve(req: func.HttpRequest) -> func.HttpResponse:
             logging.info(f"Found PR #{pr_id} for branch '{ticket}'")
 
         # PR'ı onayla ve merge et
+        # Önce PR detaylarını al
+        pr_details_url = f"https://dev.azure.com/{AZURE_ORG}/{AZURE_PROJECT}/_apis/git/repositories/{repo_id}/pullrequests/{pr_id}?api-version=7.1-preview.1"
+        pr_details = _pa_do_request(pr_details_url)
+        
+        last_merge_source_commit = pr_details.get("lastMergeSourceCommit", {}).get("commitId")
+        if not last_merge_source_commit:
+            return func.HttpResponse(json.dumps({"status": "PR_DETAILS_ERROR", "message": "❌ Could not get PR source commit details."}), status_code=500, mimetype="application/json")
+
         pr_update_url = f"https://dev.azure.com/{AZURE_ORG}/{AZURE_PROJECT}/_apis/git/repositories/{repo_id}/pullrequests/{pr_id}?api-version=7.1-preview.1"
         pr_update_payload = {
             "status": "completed",
-            "lastMergeSourceCommit": {"commitId": ""},  # Azure DevOps otomatik dolduracak
+            "lastMergeSourceCommit": {"commitId": last_merge_source_commit},
             "completionOptions": {
                 "mergeCommitMessage": f"Approved and merged: {ticket} -> test",
                 "deleteSourceBranch": True,  # Branch'i otomatik sil
