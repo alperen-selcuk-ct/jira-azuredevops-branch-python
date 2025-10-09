@@ -136,47 +136,6 @@ def new_branch(req: func.HttpRequest) -> func.HttpResponse:
         encoded_credentials = base64.b64encode(credentials.encode()).decode()
         
         try:
-            # 0️⃣ Branch'in zaten var olup olmadığını kontrol et (Azure DevOps bazı durumlarda duplicate create'e hata döndürmeyebiliyor)
-            # URL encode ticket name for proper API call
-            encoded_ticket = urllib.parse.quote(ticket, safe='')
-            existing_url = f"https://dev.azure.com/{AZURE_ORG}/{AZURE_PROJECT}/_apis/git/repositories/{repo_id}/refs/heads/{encoded_ticket}?api-version=7.1-preview.1"
-            existing_req = urllib.request.Request(existing_url)
-            existing_req.add_header("Authorization", f"Basic {encoded_credentials}")
-            existing_req.add_header("Content-Type", "application/json")
-            import urllib.error
-            try:
-                with urllib.request.urlopen(existing_req) as existing_resp:
-                    existing_data = json.loads(existing_resp.read().decode())
-                    if existing_data.get("value"):
-                        logging.info(f"Branch already exists (pre-check): {ticket}")
-                        return func.HttpResponse(
-                            json.dumps({
-                                "status": "BRANCH_CONFLICT",
-                                "message": f"⚠️ CONFLICT: Branch '{ticket}' already exists in '{repo_name}'",
-                                "branch": ticket,
-                                "repo": repo_name,
-                                "error": "Branch already exists",
-                                "success": False
-                            }),
-                            status_code=409,
-                            mimetype="application/json"
-                        )
-            except urllib.error.HTTPError as pre_check_err:
-                # 404 => branch yok, devam et; diğer durumlarda hatayı fırlat
-                if pre_check_err.code != 404:
-                    error_msg = pre_check_err.read().decode() if pre_check_err.fp else str(pre_check_err)
-                    logging.error(f"Branch existence check failed: {pre_check_err.code} - {error_msg}")
-                    return func.HttpResponse(
-                        json.dumps({
-                            "status": "BRANCH_CHECK_ERROR",
-                            "message": "❌ ERROR: Failed while checking if branch exists",
-                            "error": error_msg,
-                            "success": False
-                        }),
-                        status_code=500,
-                        mimetype="application/json"
-                    )
-
             # 1️⃣ Dev branch'in SHA'sını al
             dev_url = f"https://dev.azure.com/{AZURE_ORG}/{AZURE_PROJECT}/_apis/git/repositories/{repo_id}/refs/heads/dev?api-version=7.1-preview.1"
             
@@ -230,16 +189,19 @@ def new_branch(req: func.HttpRequest) -> func.HttpResponse:
             logging.error(f"Azure DevOps API error: {e.code} - {error_msg}")
             
             if e.code == 409:
+                # Branch zaten var, ama hata vermeyelim - başarılı olarak gösterelim
+                logging.info(f"Branch '{ticket}' already exists, returning success")
                 return func.HttpResponse(
                     json.dumps({
-                        "status": "BRANCH_CONFLICT",
-                        "message": f"⚠️ CONFLICT: Branch '{ticket}' already exists in '{repo_name}'",
+                        "status": "BRANCH_ALREADY_EXISTS",
+                        "message": f"✅ SUCCESS: Branch '{ticket}' already exists in '{repo_name}'",
                         "branch": ticket,
                         "repo": repo_name,
-                        "error": "Branch already exists",
-                        "success": False
+                        "repo_id": repo_id,
+                        "note": "Branch was already created previously",
+                        "success": True
                     }),
-                    status_code=409,
+                    status_code=200,
                     mimetype="application/json"
                 )
             else:
