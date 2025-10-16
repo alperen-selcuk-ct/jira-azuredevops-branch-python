@@ -721,7 +721,7 @@ def pr_approve(req: func.HttpRequest) -> func.HttpResponse:
             "lastMergeSourceCommit": {"commitId": last_merge_source_commit},
             "completionOptions": {
                 "mergeCommitMessage": f"Approved and merged: {formatted_title}",
-                "deleteSourceBranch": True,  # Branch'i otomatik sil
+                "deleteSourceBranch": False,  # Branch'i silme, manuel DeleteBranch ile silinecek
                 "mergeStrategy": "squash"  # Squash merge
             }
         }
@@ -732,7 +732,7 @@ def pr_approve(req: func.HttpRequest) -> func.HttpResponse:
         # Başarılı Sonuç
         resp = {
             "status": "PR_APPROVED_AND_MERGED",
-            "message": f"✅ Successfully approved PR #{pr_id}, merged '{ticket}' to test, and deleted branch.",
+            "message": f"✅ Successfully approved PR #{pr_id} and merged '{ticket}' to test. Branch remains active.",
             "branch": ticket,
             "repo": repo_name,
             "pr_id": pr_id,
