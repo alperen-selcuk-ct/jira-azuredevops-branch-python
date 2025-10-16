@@ -81,6 +81,7 @@ def new_branch(req: func.HttpRequest) -> func.HttpResponse:
         # Parametreleri al
         ticket = req.params.get('ticket')
         repo_name = req.params.get('repo')
+        user_email = req.params.get('user_email')  # Jira webhook'tan gelen user email
         
         # Basit kontroller
         if not ticket or not repo_name:
@@ -565,6 +566,7 @@ def pr_open(req: func.HttpRequest) -> func.HttpResponse:
     try:
         ticket = req.params.get('ticket')
         repo_name = req.params.get('repo')
+        user_email = req.params.get('user_email')  # Jira webhook'tan gelen user email
 
         # --- 1. Parametre ve Ortam Değişkeni Kontrolleri ---
         if not ticket or not repo_name:
@@ -597,6 +599,27 @@ def pr_open(req: func.HttpRequest) -> func.HttpResponse:
         def _po_get_branch_sha(branch_name: str) -> str:
             """PrOpen fonksiyonuna özel SHA alma yardımcısı."""
             encoded_branch = urllib.parse.quote(branch_name, safe='')
+
+        def _po_get_azure_user(email: str) -> dict:
+            """Email ile Azure DevOps user bilgisini bulur."""
+            if not email:
+                return None
+            try:
+                # Azure DevOps Users API ile email'e göre user ara
+                search_url = f"https://vssps.dev.azure.com/{AZURE_ORG}/_apis/graph/users?api-version=7.1-preview.1"
+                users = _po_do_request(search_url)
+                
+                for user in users.get('value', []):
+                    if user.get('mailAddress', '').lower() == email.lower():
+                        return {
+                            "id": user.get('originId'),
+                            "displayName": user.get('displayName'),
+                            "uniqueName": user.get('mailAddress')
+                        }
+                return None
+            except Exception as e:
+                logging.warning(f"Could not find Azure user for email {email}: {str(e)}")
+                return None
             url = f"https://dev.azure.com/{AZURE_ORG}/{AZURE_PROJECT}/_apis/git/repositories/{repo_id}/refs?filter=heads/{encoded_branch}&api-version=7.1-preview.1"
             refs = _po_do_request(url)
             if 'value' in refs and len(refs['value']) > 0:
@@ -617,12 +640,24 @@ def pr_open(req: func.HttpRequest) -> func.HttpResponse:
         # 'test' Branch'ine PR Aç
         pr_create_url = f"https://dev.azure.com/{AZURE_ORG}/{AZURE_PROJECT}/_apis/git/repositories/{repo_id}/pullrequests?api-version=7.1-preview.1"
         formatted_title = format_pr_title(ticket)
+        
+        # User bilgisini bul
+        azure_user = _po_get_azure_user(user_email) if user_email else None
+        
         pr_payload_test = {
             "sourceRefName": f"refs/heads/{ticket}",
             "targetRefName": "refs/heads/test",
             "title": formatted_title,
             "description": f"Automated PR from '{ticket}' to 'test' for code review process."
         }
+        
+        # Eğer user bilgisi bulunduysa createdBy ekle
+        if azure_user:
+            pr_payload_test["createdBy"] = azure_user
+            logging.info(f"Setting PR author to: {azure_user.get('displayName')} ({azure_user.get('uniqueName')})")
+        else:
+            logging.warning(f"Could not find Azure user for email: {user_email}")
+            
         test_pr = _po_do_request(pr_create_url, method='POST', payload=pr_payload_test)
         test_pr_id = test_pr.get("pullRequestId")
         logging.info(f"Successfully created PR to test: #{test_pr_id}")
