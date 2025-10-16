@@ -20,6 +20,35 @@ BRANCH_REGEX = r"(?i)^(?!.*\s)(?:AI|BE|CT|DO|FE|MP|SQL|TD|UI)-\d+(?:-[a-z0-9]+){
 AZURE_ORG = "customstechnologies"
 AZURE_PROJECT = "CustomsOnline"
 
+def format_pr_title(branch_name: str) -> str:
+    """
+    Branch ismini PR title formatına çevirir.
+    Örnek: ramazan-altinsoy/CT-8594-firma-firma-ekle-ilgililer 
+    -> CT-8594: Firma Firma Ekle İlgililer
+    """
+    # Folder varsa sadece branch kısmını al
+    if '/' in branch_name:
+        actual_branch = branch_name.split('/')[-1]
+    else:
+        actual_branch = branch_name
+    
+    # Branch formatı: CT-8594-firma-firma-ekle-ilgililer
+    parts = actual_branch.split('-')
+    if len(parts) < 3:
+        return actual_branch  # Format uygun değilse olduğu gibi döndür
+    
+    # İlk iki parça ticket kodu: CT-8594
+    ticket_code = f"{parts[0]}-{parts[1]}"
+    
+    # Geri kalan kısım description: firma-firma-ekle-ilgililer
+    description_parts = parts[2:]
+    
+    # Her kelimenin ilk harfini büyüt, - işaretlerini boşluğa çevir
+    formatted_description = ' '.join([word.capitalize() for word in description_parts])
+    
+    # Final format: CT-8594: Firma Firma Ekle İlgililer
+    return f"{ticket_code}: {formatted_description}"
+
 @app.function_name(name="HttpExample")
 @app.route(route="test", methods=["get", "post"], auth_level=func.AuthLevel.ANONYMOUS)
 def test_function(req: func.HttpRequest) -> func.HttpResponse:
@@ -479,15 +508,26 @@ def dev_merge(req: func.HttpRequest) -> func.HttpResponse:
                 "dev_sha": target_sha
             }), status_code=200, mimetype="application/json")
         else:
-            # 'dev' Branch'ini direkt güncelle (fast-forward merge)
-            update_ref_url = f"https://dev.azure.com/{AZURE_ORG}/{AZURE_PROJECT}/_apis/git/repositories/{repo_id}/refs?api-version=7.1-preview.1"
-            update_payload = [{"name": "refs/heads/dev", "oldObjectId": target_sha, "newObjectId": source_sha}]
+            # Basic 3-way merge (merge commit oluşturur)
+            merge_url = f"https://dev.azure.com/{AZURE_ORG}/{AZURE_PROJECT}/_apis/git/repositories/{repo_id}/merges?api-version=7.1-preview.1"
+            merge_payload = {
+                "parents": [source_sha, target_sha],
+                "comment": f"Merge {ticket} into dev"
+            }
             try:
+                merge_result = _dm_do_request(merge_url, method='POST', payload=merge_payload)
+                new_merge_commit_sha = merge_result['commitId']
+                logging.info(f"Successfully created merge commit: {new_merge_commit_sha}")
+                
+                # Dev branch'ini yeni merge commit'e güncelle
+                update_ref_url = f"https://dev.azure.com/{AZURE_ORG}/{AZURE_PROJECT}/_apis/git/repositories/{repo_id}/refs?api-version=7.1-preview.1"
+                update_payload = [{"name": "refs/heads/dev", "oldObjectId": target_sha, "newObjectId": new_merge_commit_sha}]
                 _dm_do_request(update_ref_url, method='POST', payload=update_payload)
-                logging.info(f"Successfully fast-forward merged '{ticket}' into dev. New dev SHA: {source_sha}")
+                logging.info(f"Successfully updated dev branch to merge commit: {new_merge_commit_sha}")
+                
             except urllib.error.HTTPError as merge_err:
                 if merge_err.code == 409:
-                    return func.HttpResponse(json.dumps({"status": "MERGE_CONFLICT", "message": f"⚠️ Merge conflict: '{ticket}' cannot be fast-forward merged into dev. Manual merge required."}), status_code=409, mimetype="application/json")
+                    return func.HttpResponse(json.dumps({"status": "MERGE_CONFLICT", "message": f"⚠️ Merge conflict: '{ticket}' has conflicts with dev. Manual merge required."}), status_code=409, mimetype="application/json")
                 raise
 
         # Başarılı Sonuç
@@ -497,7 +537,8 @@ def dev_merge(req: func.HttpRequest) -> func.HttpResponse:
             "branch": ticket,
             "repo": repo_name,
             "dev_old_sha": target_sha,
-            "dev_new_sha": source_sha
+            "dev_new_sha": new_merge_commit_sha,
+            "merge_commit": new_merge_commit_sha
         }
         return func.HttpResponse(json.dumps(resp), status_code=200, mimetype="application/json")
 
@@ -575,10 +616,11 @@ def pr_open(req: func.HttpRequest) -> func.HttpResponse:
 
         # 'test' Branch'ine PR Aç
         pr_create_url = f"https://dev.azure.com/{AZURE_ORG}/{AZURE_PROJECT}/_apis/git/repositories/{repo_id}/pullrequests?api-version=7.1-preview.1"
+        formatted_title = format_pr_title(ticket)
         pr_payload_test = {
             "sourceRefName": f"refs/heads/{ticket}",
             "targetRefName": "refs/heads/test",
-            "title": f"{ticket}",
+            "title": formatted_title,
             "description": f"Automated PR from '{ticket}' to 'test' for code review process."
         }
         test_pr = _po_do_request(pr_create_url, method='POST', payload=pr_payload_test)
@@ -673,11 +715,12 @@ def pr_approve(req: func.HttpRequest) -> func.HttpResponse:
             return func.HttpResponse(json.dumps({"status": "PR_DETAILS_ERROR", "message": "❌ Could not get PR source commit details."}), status_code=500, mimetype="application/json")
 
         pr_update_url = f"https://dev.azure.com/{AZURE_ORG}/{AZURE_PROJECT}/_apis/git/repositories/{repo_id}/pullrequests/{pr_id}?api-version=7.1-preview.1"
+        formatted_title = format_pr_title(ticket)
         pr_update_payload = {
             "status": "completed",
             "lastMergeSourceCommit": {"commitId": last_merge_source_commit},
             "completionOptions": {
-                "mergeCommitMessage": f"Approved and merged: {ticket} -> test",
+                "mergeCommitMessage": f"Approved and merged: {formatted_title}",
                 "deleteSourceBranch": True,  # Branch'i otomatik sil
                 "mergeStrategy": "squash"  # Squash merge
             }
