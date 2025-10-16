@@ -10,7 +10,8 @@ REPO_MAP = {
     "CustomsOnlineAI": "4890959d-88d1-4ca0-a3ed-f114ac012f13",
     "CustomsOnlineAngular": "8b7baf0c-0000-49d2-a874-254bc6478103",
     "CustomsOnlineBackEnd": "ff0446c2-c9c2-4dea-a598-2226fb886392",
-    "CustomsOnlineMobile": "d00d23f3-a9e2-4869-b711-86a4005f214b"
+    "CustomsOnlineMobile": "d00d23f3-a9e2-4869-b711-86a4005f214b",
+    "CTJira": "37b3a1ae-60f2-4ab8-9d2b-da5d8ba743e2"
 }
 
 # Branch regex kontrolü - SADECE STRING OLARAK
